@@ -1,0 +1,94 @@
+{% extends 'main/base.html' %}
+
+{% block title %}Home - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">🚀 Welcome to Project GCE 3!</h2>
+        <p class="card-subtitle">MetaTrader5 Integration System</p>
+    </div>
+    
+    <div class="row">
+        <div class="col">
+            <p><strong>System Status:</strong> Active and ready to work</p>
+            <p><strong>Django Version:</strong> 5.2.6</p>
+            <p><strong>MetaTrader5:</strong> {% if mt5_available %}✅ Library connected{% else %}❌ Library not available{% endif %}</p>
+        </div>
+    </div>
+
+    <div class="dashboard-grid">
+        <div class="metric-card">
+            <div class="metric-value">3</div>
+            <div class="metric-label">Active Modules</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{% if mt5_settings_count %}{{ mt5_settings_count }}{% else %}0{% endif %}</div>
+            <div class="metric-label">MT5 Settings</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">100%</div>
+            <div class="metric-label">System Uptime</div>
+        </div>
+    </div>
+
+    <div style="margin-top: 2rem;">
+        <h3>🔧 Quick Actions:</h3>
+        <div style="margin-top: 1rem; display: flex; gap: 1rem; flex-wrap: wrap;">
+            <a href="{% url 'main:system_dashboard' %}" class="btn btn-primary">
+                ⚙️ System Dashboard
+            </a>
+            <a href="{% url 'main:trading_history' %}" class="btn btn-secondary">
+                📈 Trading History
+            </a>
+            <a href="/admin/" class="btn btn-secondary" target="_blank">
+                🔧 Admin Panel
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">📊 Обзор системы</h3>
+    </div>
+    
+    <div class="alert alert-info">
+        <strong>Информация:</strong> Система готова к подключению MetaTrader5. 
+        Для настройки перейдите в <a href="/admin/">админ панель</a> и добавьте настройки MT5.
+    </div>
+
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Компонент</th>
+                <th>Статус</th>
+                <th>Описание</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Django Framework</td>
+                <td><span class="status connected">✅ Активен</span></td>
+                <td>Веб-фреймворк работает корректно</td>
+            </tr>
+            <tr>
+                <td>MetaTrader5 Library</td>
+                <td>
+                    {% if mt5_available %}
+                        <span class="status connected">✅ Подключена</span>
+                    {% else %}
+                        <span class="status disconnected">❌ Не доступна</span>
+                    {% endif %}
+                </td>
+                <td>Библиотека для работы с MT5</td>
+            </tr>
+            <tr>
+                <td>База данных</td>
+                <td><span class="status connected">✅ Подключена</span></td>
+                <td>SQLite база данных</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Project GCE 3{% endblock %}</title>
+    {% load static %}
+    <link rel="stylesheet" href="{% static 'main/css/style.css' %}">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <h1 class="logo">
+                <a href="{% url 'main:home' %}">🚀 Project GCE 3</a>
+            </h1>
+            <nav class="main-nav">
+                <ul class="nav-list">
+                    <li class="nav-item">
+                        <a href="{% url 'main:home' %}" class="nav-link {% if request.resolver_match.url_name == 'home' %}active{% endif %}">
+                            🏠 Home
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{% url 'main:trading_history' %}" class="nav-link {% if request.resolver_match.url_name == 'trading_history' %}active{% endif %}">
+                            📈 Trading History
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{% url 'main:raw_signals' %}" class="nav-link {% if request.resolver_match.url_name == 'raw_signals' %}active{% endif %}">
+                            📊 Raw Signals
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{% url 'main:system_dashboard' %}" class="nav-link {% if request.resolver_match.url_name == 'system_dashboard' %}active{% endif %}">
+                            ⚙️ System
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="/admin/" class="nav-link" target="_blank">
+                            🔧 Admin
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <div class="container">
+            {% block content %}
+            {% endblock %}
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="footer-line footer-top">
+            <span class="copyright">&copy; 2025 Project GCE 3</span>
+            <span class="mt5-status">
+                <span id="footerMT5Status" class="status-indicator">🔴 Disconnected</span>
+                <span class="account-data">
+                    Balance: <span id="footerBalance" class="value">$0.00</span> | 
+                    Equity: <span id="footerEquity" class="value">$0.00</span>
+                </span>
+            </span>
+            <span class="datetime">
+                <span id="currentTime" class="time">00:00:00</span>
+            </span>
+        </div>
+        <div class="footer-line footer-bottom">
+            <span class="system-info">MetaTrader5 Integration System</span>
+            <span class="date-info">
+                <span id="currentDate" class="date">January 1, 2025</span>
+            </span>
+        </div>
+    </footer>
+
+    <script>
+        // Real-time clock
+        function updateDateTime() {
+            const now = new Date();
+            
+            // Update time
+            const timeOptions = {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+            };
+            const timeString = now.toLocaleTimeString('en-US', timeOptions);
+            document.getElementById('currentTime').textContent = timeString;
+            
+            // Update date
+            const dateOptions = {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            };
+            const dateString = now.toLocaleDateString('en-US', dateOptions);
+            document.getElementById('currentDate').textContent = dateString;
+        }
+
+        // Update footer MT5 status
+        function updateFooterMT5Status() {
+            fetch('/api/mt5/status/')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.connections && data.connections.length > 0) {
+                        // Get the first active connection
+                        const connection = data.connections[0];
+                        const statusElement = document.getElementById('footerMT5Status');
+                        const balanceElement = document.getElementById('footerBalance');
+                        const equityElement = document.getElementById('footerEquity');
+                        
+                        if (connection.is_connected) {
+                            statusElement.textContent = '🟢 Connected';
+                            statusElement.className = 'status-indicator connected';
+                        } else {
+                            statusElement.textContent = '🔴 Disconnected';
+                            statusElement.className = 'status-indicator disconnected';
+                        }
+                        
+                        // Update balance and equity
+                        const balance = connection.balance || 0;
+                        const equity = connection.equity || 0;
+                        balanceElement.textContent = `$${balance.toFixed(2)}`;
+                        equityElement.textContent = `$${equity.toFixed(2)}`;
+                    } else {
+                        document.getElementById('footerMT5Status').textContent = '🔴 No Connection';
+                        document.getElementById('footerMT5Status').className = 'status-indicator disconnected';
+                        document.getElementById('footerBalance').textContent = '$0.00';
+                        document.getElementById('footerEquity').textContent = '$0.00';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error updating footer MT5 status:', error);
+                    document.getElementById('footerMT5Status').textContent = '⚠️ Error';
+                    document.getElementById('footerMT5Status').className = 'status-indicator error';
+                });
+        }
+
+        // Initialize and start updates
+        document.addEventListener('DOMContentLoaded', function() {
+            // Update immediately
+            updateDateTime();
+            updateFooterMT5Status();
+            
+            // Update time every second
+            setInterval(updateDateTime, 1000);
+            
+            // Update MT5 status every 5 seconds
+            setInterval(updateFooterMT5Status, 5000);
+        });
+    </script>
+</body>
+</html>

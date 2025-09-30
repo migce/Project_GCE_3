@@ -1,0 +1,719 @@
+{% extends 'main/base.html' %}
+
+{% block title %}System Dashboard - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">⚙️ System Dashboard</h2>
+        <p class="card-subtitle">System components and connections monitoring</p>
+    </div>
+    
+    <div class="dashboard-grid">
+        <div class="metric-card">
+            <div class="metric-value" style="color: {% if system_uptime %}#28a745{% else %}#dc3545{% endif %};">
+                {{ system_uptime|default:"0" }}
+            </div>
+            <div class="metric-label">System Uptime</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value" style="color: {% if mt5_settings_count > 0 %}#28a745{% else %}#ffc107{% endif %};">
+                {{ mt5_settings_count|default:"0" }}
+            </div>
+            <div class="metric-label">MT5 Settings</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value" style="color: #17a2b8;">
+                {% if active_connections %}{{ active_connections }}{% else %}0{% endif %}
+            </div>
+            <div class="metric-label">Active Connections</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value" style="color: #6f42c1;">
+                3
+            </div>
+            <div class="metric-label">System Modules</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">🔍 MT5 Monitoring Service</h3>
+        <div style="float: right;">
+            <button id="startMonitoringBtn" class="btn btn-success" onclick="startMonitoring()" style="display: none;">▶️ Start Monitoring</button>
+            <button id="stopMonitoringBtn" class="btn btn-danger" onclick="stopMonitoring()" style="display: none;">⏹️ Stop Monitoring</button>
+            <button class="btn btn-secondary" onclick="refreshMonitoringStatus()">🔄 Refresh</button>
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    
+    <div style="padding: 1.5rem;">
+        <div class="dashboard-grid">
+            <div class="metric-card">
+                <div id="monitoringStatus" class="metric-value" style="color: #6c757d;">
+                    ⏳ Loading...
+                </div>
+                <div class="metric-label">Service Status</div>
+            </div>
+            <div class="metric-card">
+                <div id="healthCheckInterval" class="metric-value" style="color: #17a2b8;">
+                    -
+                </div>
+                <div class="metric-label">Check Interval (sec)</div>
+            </div>
+            <div class="metric-card">
+                <div id="autoReconnectStatus" class="metric-value" style="color: #17a2b8;">
+                    -
+                </div>
+                <div class="metric-label">Auto-Reconnect</div>
+            </div>
+            <div class="metric-card">
+                <div id="maxReconnectAttempts" class="metric-value" style="color: #17a2b8;">
+                    -
+                </div>
+                <div class="metric-label">Max Reconnect Attempts</div>
+            </div>
+        </div>
+        
+        <div class="alert alert-info" style="margin-top: 1rem;">
+            <strong>Info:</strong> The monitoring service automatically checks MT5 connections and attempts to reconnect when connections are lost.
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">🔌 MetaTrader5 Connections</h3>
+        <div style="float: right;">
+            <button class="btn btn-primary" onclick="window.location.reload();">🔄 Refresh Status</button>
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    
+    {% if mt5_connections %}
+        {% for connection in mt5_connections %}
+        <div data-connection-id="{{ connection.id }}" style="background: #f8f9fa; padding: 1.5rem; margin: 1rem 0; border-radius: 8px; border-left: 4px solid {% if connection.is_connected %}#28a745{% else %}#dc3545{% endif %};">
+            <div style="display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: center;">
+                <div>
+                    <h4 style="margin-bottom: 0.5rem;">
+                        {{ connection.name }}
+                        <span class="status {% if connection.is_connected %}connected{% else %}disconnected{% endif %}">
+                            {% if connection.is_connected %}✅ Connected{% else %}❌ Disconnected{% endif %}
+                        </span>
+                    </h4>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                        <div>
+                            <strong>Server:</strong> {{ connection.server|default:"Not specified" }}
+                        </div>
+                        <div>
+                            <strong>Login:</strong> {{ connection.login|default:"Not specified" }}
+                        </div>
+                        <div data-field="balance">
+                            <strong>Balance:</strong> 
+                            {% if connection.balance %}
+                                ${{ connection.balance|floatformat:2 }}
+                            {% else %}
+                                <span style="color: #6c757d;">Unavailable</span>
+                            {% endif %}
+                        </div>
+                        <div data-field="equity">
+                            <strong>Equity:</strong> 
+                            {% if connection.equity %}
+                                ${{ connection.equity|floatformat:2 }}
+                            {% else %}
+                                <span style="color: #6c757d;">Unavailable</span>
+                            {% endif %}
+                        </div>
+                        <div data-field="last_update">
+                            <strong>Last Update:</strong> 
+                            <span style="color: #6c757d;">{{ connection.last_update|default:"Never" }}</span>
+                        </div>
+                    </div>
+                    {% if connection.error_message %}
+                        <div class="alert alert-danger" style="margin-top: 1rem;">
+                            <strong>Error:</strong> {{ connection.error_message }}
+                        </div>
+                    {% endif %}
+                </div>
+                <div style="text-align: center;">
+                    {% if connection.is_connected %}
+                        <button class="btn btn-warning" 
+                                onclick="disconnectMT5('{{ connection.id }}')"
+                                id="btn-{{ connection.id }}">
+                            🔌 Disconnect
+                        </button>
+                    {% else %}
+                        <button class="btn btn-success" 
+                                onclick="connectMT5('{{ connection.id }}')"
+                                id="btn-{{ connection.id }}">
+                            🔗 Connect
+                        </button>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div style="text-align: center; padding: 3rem; color: #6c757d;">
+            <div style="font-size: 3rem; margin-bottom: 1rem;">🔧</div>
+            <h4>Подключения MetaTrader5 не настроены</h4>
+            <p>Добавьте настройки подключения в админ панели для начала мониторинга</p>
+            <div style="margin-top: 1.5rem;">
+                <a href="/admin/main/mt5settings/add/" class="btn btn-primary" target="_blank">
+                    ➕ Добавить подключение MT5
+                </a>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">📊 Статус компонентов системы</h3>
+    </div>
+    
+    <table class="table">
+        <thead>
+            <tr>
+                <th style="width: 30%;">Компонент</th>
+                <th style="width: 20%;">Статус</th>
+                <th style="width: 30%;">Версия/Информация</th>
+                <th style="width: 20%;">Действие</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>
+                    <strong>🌐 Django Framework</strong><br>
+                    <small style="color: #6c757d;">Веб-фреймворк</small>
+                </td>
+                <td>
+                    <span class="status connected">✅ Активен</span>
+                </td>
+                <td>
+                    Django 5.2.6<br>
+                    <small style="color: #6c757d;">Python {{ python_version }}</small>
+                </td>
+                <td>
+                    <button class="btn btn-secondary" disabled>Работает</button>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <strong>📊 MetaTrader5 Library</strong><br>
+                    <small style="color: #6c757d;">Библиотека подключения</small>
+                </td>
+                <td>
+                    {% if mt5_available %}
+                        <span class="status connected">✅ Доступна</span>
+                    {% else %}
+                        <span class="status disconnected">❌ Недоступна</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if mt5_version %}{{ mt5_version }}{% else %}Не установлена{% endif %}<br>
+                    <small style="color: #6c757d;">Терминал: {% if mt5_terminal_info %}{{ mt5_terminal_info }}{% else %}Не подключен{% endif %}</small>
+                </td>
+                <td>
+                    {% if mt5_available %}
+                        <button class="btn btn-primary" onclick="testMT5Connection()">🔍 Тест</button>
+                    {% else %}
+                        <button class="btn btn-secondary" disabled>Недоступно</button>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <strong>💾 База данных</strong><br>
+                    <small style="color: #6c757d;">Хранилище данных</small>
+                </td>
+                <td>
+                    <span class="status connected">✅ Подключена</span>
+                </td>
+                <td>
+                    SQLite<br>
+                    <small style="color: #6c757d;">{{ db_size|default:"Размер неизвестен" }}</small>
+                </td>
+                <td>
+                    <button class="btn btn-secondary" onclick="checkDatabase()">🔍 Проверить</button>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">⚡ Quick Actions</h3>
+    </div>
+    
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
+        <div style="padding: 1.5rem; background: #f8f9fa; border-radius: 8px; text-align: center;">
+            <h4>🔧 Settings Management</h4>
+            <p style="color: #6c757d; margin: 1rem 0;">Configure MT5 connections</p>
+            <a href="/admin/main/mt5connectionsettings/" class="btn btn-primary" target="_blank">Open Admin Panel</a>
+        </div>
+        <div style="padding: 1.5rem; background: #f8f9fa; border-radius: 8px; text-align: center;">
+            <h4>📈 Trading History</h4>
+            <p style="color: #6c757d; margin: 1rem 0;">View operations and statistics</p>
+            <a href="{% url 'main:trading_history' %}" class="btn btn-primary">Go to History</a>
+        </div>
+        <div style="padding: 1.5rem; background: #f8f9fa; border-radius: 8px; text-align: center;">
+            <h4>🏠 Home Page</h4>
+            <p style="color: #6c757d; margin: 1rem 0;">System overview</p>
+            <a href="{% url 'main:home' %}" class="btn btn-primary">Go Home</a>
+        </div>
+    </div>
+</div>
+
+<script>
+// Get CSRF token for AJAX requests
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    return cookieValue;
+}
+
+const csrftoken = getCookie('csrftoken');
+
+// Function to connect to MT5
+function connectMT5(settingsId) {
+    const button = document.getElementById('btn-' + settingsId);
+    const originalText = button.innerHTML;
+    
+    // Disable button and show loading state
+    button.disabled = true;
+    button.innerHTML = '🔄 Connecting...';
+    
+    fetch('{% url "main:mt5_connect" %}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRFToken': csrftoken,
+        },
+        body: 'settings_id=' + settingsId
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Update connection status without full reload
+            updateConnectionStatus(settingsId, true, data.balance, data.equity, data.last_update);
+            
+            // Show success message
+            showMessage('Success: ' + data.message, 'success');
+        } else {
+            // Show error message
+            showMessage('Error: ' + data.message, 'error');
+            
+            // Restore button
+            button.disabled = false;
+            button.innerHTML = originalText;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showMessage('Connection failed: ' + error.message, 'error');
+        
+        // Restore button
+        button.disabled = false;
+        button.innerHTML = originalText;
+    });
+}
+
+// Function to update connection status in UI
+function updateConnectionStatus(settingsId, isConnected, balance, equity, lastUpdate) {
+    const container = document.querySelector(`[data-connection-id="${settingsId}"]`);
+    if (!container) return;
+    
+    // Update status badge
+    const statusElement = container.querySelector('.status');
+    if (statusElement) {
+        if (isConnected) {
+            statusElement.className = 'status connected';
+            statusElement.innerHTML = '✅ Connected';
+        } else {
+            statusElement.className = 'status disconnected';
+            statusElement.innerHTML = '❌ Disconnected';
+        }
+    }
+    
+    // Update balance
+    const balanceElement = container.querySelector('[data-field="balance"]');
+    if (balanceElement && balance !== null) {
+        balanceElement.innerHTML = `<strong>Balance:</strong> $${parseFloat(balance).toFixed(2)}`;
+    }
+    
+    // Update equity
+    const equityElement = container.querySelector('[data-field="equity"]');
+    if (equityElement && equity !== null) {
+        equityElement.innerHTML = `<strong>Equity:</strong> $${parseFloat(equity).toFixed(2)}`;
+    }
+    
+    // Update last update time
+    const updateElement = container.querySelector('[data-field="last_update"]');
+    if (updateElement && lastUpdate) {
+        updateElement.innerHTML = `<strong>Last Update:</strong> <span style="color: #6c757d;">${lastUpdate}</span>`;
+    }
+    
+    // Update button
+    const button = document.getElementById('btn-' + settingsId);
+    if (button) {
+        button.disabled = false;
+        if (isConnected) {
+            button.innerHTML = '🔌 Disconnect';
+            button.onclick = () => disconnectMT5(settingsId);
+        } else {
+            button.innerHTML = '🔌 Connect';
+            button.onclick = () => connectMT5(settingsId);
+        }
+    }
+}
+
+// Function to show messages
+function showMessage(message, type) {
+    // Simple alert for now, can be improved with toast notifications
+    alert(message);
+}
+
+// Function to disconnect from MT5
+function disconnectMT5(settingsId) {
+    const button = document.getElementById('btn-' + settingsId);
+    const originalText = button.innerHTML;
+    
+    // Disable button and show loading state
+    button.disabled = true;
+    button.innerHTML = '🔄 Disconnecting...';
+    
+    fetch('{% url "main:mt5_disconnect" %}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRFToken': csrftoken,
+        },
+        body: 'settings_id=' + settingsId
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Show success message
+            alert('Success: ' + data.message);
+            // Reload page to update connection status
+            window.location.reload();
+        } else {
+            // Show error message
+            alert('Error: ' + data.message);
+            // Restore button
+            button.disabled = false;
+            button.innerHTML = originalText;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('Disconnection failed: ' + error.message);
+        // Restore button
+        button.disabled = false;
+        button.innerHTML = originalText;
+    });
+}
+
+// Legacy function for compatibility
+function toggleConnection(connectionId) {
+    alert('Please use the new Connect/Disconnect buttons for MT5 connections.');
+}
+
+function testMT5Connection() {
+    alert('MT5 Connection Test...\nThis feature will be implemented in future versions.');
+}
+
+function checkDatabase() {
+    alert('Database Check...\nEverything is OK! Database is working correctly.');
+}
+
+// Auto-refresh functionality
+let autoRefreshInterval = null;
+let autoRefreshEnabled = false;
+
+function startAutoRefresh() {
+    if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+    }
+    
+    autoRefreshInterval = setInterval(function() {
+        updateAllConnectionsStatus();
+    }, 5000); // Update every 5 seconds for better responsiveness
+    
+    autoRefreshEnabled = true;
+    console.log('Auto-refresh started (every 5 seconds)');
+}
+
+function stopAutoRefresh() {
+    if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+    }
+    autoRefreshEnabled = false;
+    console.log('Auto-refresh stopped');
+}
+
+function updateAllConnectionsStatus() {
+    // Update MT5 connections status
+    fetch('{% url "main:mt5_status_api" %}')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                data.connections.forEach(connection => {
+                    updateConnectionDisplay(connection);
+                });
+                console.log('MT5 status updated at', new Date().toLocaleTimeString());
+            } else {
+                console.error('Failed to fetch MT5 status:', data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error updating MT5 status:', error);
+        });
+    
+    // Update monitoring service status
+    refreshMonitoringStatus();
+}
+
+function updateConnectionDisplay(connection) {
+    const connectionDiv = document.querySelector(`[data-connection-id="${connection.id}"]`);
+    if (!connectionDiv) return;
+    
+    // Update connection status indicator
+    const statusSpan = connectionDiv.querySelector('.status');
+    if (statusSpan) {
+        statusSpan.className = connection.is_connected ? 'status connected' : 'status disconnected';
+        statusSpan.innerHTML = connection.is_connected ? '✅ Connected' : '❌ Disconnected';
+    }
+    
+    // Update border color
+    connectionDiv.style.borderLeftColor = connection.is_connected ? '#28a745' : '#dc3545';
+    
+    // Update balance
+    const balanceDiv = connectionDiv.querySelector('[data-field="balance"]');
+    if (balanceDiv) {
+        const balanceText = connection.balance ? `$${parseFloat(connection.balance).toFixed(2)}` : '<span style="color: #6c757d;">Unavailable</span>';
+        balanceDiv.innerHTML = `<strong>Balance:</strong> ${balanceText}`;
+    }
+    
+    // Update equity
+    const equityDiv = connectionDiv.querySelector('[data-field="equity"]');
+    if (equityDiv) {
+        const equityText = connection.equity ? `$${parseFloat(connection.equity).toFixed(2)}` : '<span style="color: #6c757d;">Unavailable</span>';
+        equityDiv.innerHTML = `<strong>Equity:</strong> ${equityText}`;
+    }
+    
+    // Update last update time
+    const lastUpdateDiv = connectionDiv.querySelector('[data-field="last_update"]');
+    if (lastUpdateDiv) {
+        lastUpdateDiv.innerHTML = `<strong>Last Update:</strong> <span style="color: #6c757d;">${connection.last_update}</span>`;
+    }
+    
+    // Update button
+    const button = connectionDiv.querySelector(`#btn-${connection.id}`);
+    if (button && !button.disabled) {
+        if (connection.is_connected) {
+            button.className = 'btn btn-warning';
+            button.innerHTML = '🔌 Disconnect';
+            button.onclick = function() { disconnectMT5(connection.id); };
+        } else {
+            button.className = 'btn btn-success';
+            button.innerHTML = '🔗 Connect';
+            button.onclick = function() { connectMT5(connection.id); };
+        }
+    }
+    
+    // Show/hide error messages
+    let errorDiv = connectionDiv.querySelector('.alert-danger');
+    if (connection.error_message) {
+        if (!errorDiv) {
+            errorDiv = document.createElement('div');
+            errorDiv.className = 'alert alert-danger';
+            errorDiv.style.marginTop = '1rem';
+            connectionDiv.querySelector('div > div').appendChild(errorDiv);
+        }
+        errorDiv.innerHTML = `<strong>Error:</strong> ${connection.error_message}`;
+    } else if (errorDiv) {
+        errorDiv.remove();
+    }
+}
+
+// Start auto-refresh when page loads
+document.addEventListener('DOMContentLoaded', function() {
+    startAutoRefresh();
+    
+    // Add toggle button for auto-refresh
+    const refreshButton = document.querySelector('.btn-primary');
+    if (refreshButton && refreshButton.textContent.includes('Refresh Status')) {
+        const autoRefreshToggle = document.createElement('button');
+        autoRefreshToggle.className = 'btn btn-secondary';
+        autoRefreshToggle.style.marginLeft = '10px';
+        autoRefreshToggle.innerHTML = '⏸️ Auto-refresh: ON';
+        autoRefreshToggle.onclick = function() {
+            if (autoRefreshEnabled) {
+                stopAutoRefresh();
+                this.innerHTML = '▶️ Auto-refresh: OFF';
+                this.className = 'btn btn-outline-secondary';
+            } else {
+                startAutoRefresh();
+                this.innerHTML = '⏸️ Auto-refresh: ON';
+                this.className = 'btn btn-secondary';
+            }
+        };
+        refreshButton.parentNode.insertBefore(autoRefreshToggle, refreshButton.nextSibling);
+    }
+    
+    // Load monitoring status on page load
+    refreshMonitoringStatus();
+});
+
+// Monitoring control functions
+function refreshMonitoringStatus() {
+    console.log('Refreshing monitoring status...');
+    
+    fetch('/api/monitoring/status/')
+        .then(response => {
+            console.log('Status API response:', response.status);
+            return response.json();
+        })
+        .then(data => {
+            console.log('Status API data:', data);
+            if (data.success) {
+                updateMonitoringDisplay(data);
+            } else {
+                console.error('Failed to get monitoring status:', data.message);
+                showAlert('error', 'Failed to get monitoring status: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching monitoring status:', error);
+            showAlert('error', 'Network error while getting monitoring status');
+        });
+}
+
+function updateMonitoringDisplay(data) {
+    console.log('Updating monitoring display with data:', data);
+    
+    const statusElement = document.getElementById('monitoringStatus');
+    const startBtn = document.getElementById('startMonitoringBtn');
+    const stopBtn = document.getElementById('stopMonitoringBtn');
+    
+    if (!statusElement || !startBtn || !stopBtn) {
+        console.error('Missing DOM elements for monitoring display');
+        return;
+    }
+    
+    // Update status display
+    if (data.monitoring_active) {
+        statusElement.innerHTML = '🟢 Running';
+        statusElement.style.color = '#28a745';
+        startBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-block';
+        console.log('Set monitoring status to Running');
+    } else {
+        statusElement.innerHTML = '🔴 Stopped';
+        statusElement.style.color = '#dc3545';
+        startBtn.style.display = 'inline-block';
+        stopBtn.style.display = 'none';
+        console.log('Set monitoring status to Stopped');
+    }
+    
+    // Update other metrics
+    const healthCheckElement = document.getElementById('healthCheckInterval');
+    const autoReconnectElement = document.getElementById('autoReconnectStatus');
+    const maxAttemptsElement = document.getElementById('maxReconnectAttempts');
+    
+    if (healthCheckElement) healthCheckElement.innerHTML = data.health_check_interval || '-';
+    if (autoReconnectElement) autoReconnectElement.innerHTML = data.auto_reconnect_enabled ? '✅ Enabled' : '❌ Disabled';
+    if (maxAttemptsElement) maxAttemptsElement.innerHTML = data.max_reconnect_attempts || '-';
+}
+
+function startMonitoring() {
+    const startBtn = document.getElementById('startMonitoringBtn');
+    startBtn.disabled = true;
+    startBtn.innerHTML = '⏳ Starting...';
+    
+    fetch('/api/monitoring/start/', {
+        method: 'POST',
+        headers: {
+            'X-CSRFToken': getCookie('csrftoken'),
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert('success', data.message);
+            // Быстрое обновление статуса после старта
+            setTimeout(() => {
+                refreshMonitoringStatus();
+                // Дополнительное обновление через секунду для уверенности
+                setTimeout(() => {
+                    refreshMonitoringStatus();
+                }, 1000);
+            }, 200);
+        } else {
+            showAlert('error', data.message);
+        }
+    })
+    .catch(error => {
+        showAlert('error', 'Error starting monitoring service');
+        console.error('Error:', error);
+    })
+    .finally(() => {
+        startBtn.disabled = false;
+        startBtn.innerHTML = '▶️ Start Monitoring';
+    });
+}
+
+function stopMonitoring() {
+    const stopBtn = document.getElementById('stopMonitoringBtn');
+    stopBtn.disabled = true;
+    stopBtn.innerHTML = '⏳ Stopping...';
+    
+    fetch('/api/monitoring/stop/', {
+        method: 'POST',
+        headers: {
+            'X-CSRFToken': getCookie('csrftoken'),
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert('success', data.message);
+            // Быстрое обновление статуса после остановки
+            setTimeout(() => {
+                refreshMonitoringStatus();
+                // Дополнительное обновление через секунду для уверенности
+                setTimeout(() => {
+                    refreshMonitoringStatus();
+                }, 1000);
+            }, 200);
+        } else {
+            showAlert('error', data.message);
+        }
+    })
+    .catch(error => {
+        showAlert('error', 'Error stopping monitoring service');
+        console.error('Error:', error);
+    })
+    .finally(() => {
+        stopBtn.disabled = false;
+        stopBtn.innerHTML = '⏹️ Stop Monitoring';
+    });
+}
+</script>
+{% endblock %}

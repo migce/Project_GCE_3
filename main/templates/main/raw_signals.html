@@ -1,0 +1,308 @@
+{% extends 'main/base.html' %}
+{% load static %}
+
+{% block title %}Raw Signals - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>📊 Raw Signals</h1>
+    <p>TradeStation CSV Exports Analysis</p>
+</div>
+
+<div class="signals-controls">
+    <div class="card">
+        <div class="card-header">
+            <h3>📁 CSV Files</h3>
+            <div class="header-actions">
+                <button class="btn btn-secondary" onclick="refreshFileList()">🔄 Refresh</button>
+                <span class="directory-info">Directory: {{ ts_exports_dir }}</span>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if not directory_exists %}
+                <div class="alert alert-warning">
+                    <strong>⚠️ Warning:</strong> TradeStation exports directory not found: {{ ts_exports_dir }}
+                </div>
+            {% endif %}
+            
+            <div class="file-selector">
+                <label for="csvFileSelect">Select CSV File:</label>
+                <select id="csvFileSelect" class="form-control" onchange="loadSelectedFile()">
+                    <option value="">-- Select a file --</option>
+                </select>
+                <div class="file-info">
+                    <span id="fileInfo" class="text-muted">No file selected</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="signals-data" id="signalsData" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h3 id="dataTitle">📈 Signal Data</h3>
+            <div class="data-info">
+                <span id="dataInfo" class="text-muted"></span>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="table-controls">
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="Search data..." class="form-control" onkeyup="filterTable()">
+                </div>
+                <div class="table-actions">
+                    <button class="btn btn-primary" onclick="exportToCSV()">💾 Export</button>
+                    <button class="btn btn-secondary" onclick="downloadOriginal()">📥 Download Original</button>
+                </div>
+            </div>
+            
+            <div class="table-wrapper">
+                <table id="signalsTable" class="table table-striped">
+                    <thead id="tableHead">
+                        <!-- Headers will be populated by JavaScript -->
+                    </thead>
+                    <tbody id="tableBody">
+                        <!-- Data will be populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="table-pagination">
+                <div class="pagination-info">
+                    <span id="paginationInfo">Showing 0 of 0 rows</span>
+                </div>
+                <div class="pagination-controls">
+                    <button class="btn btn-sm btn-secondary" onclick="previousPage()" id="prevBtn" disabled>Previous</button>
+                    <span id="pageNumbers"></span>
+                    <button class="btn btn-sm btn-secondary" onclick="nextPage()" id="nextBtn" disabled>Next</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentData = [];
+let filteredData = [];
+let currentPage = 1;
+const rowsPerPage = 50;
+let selectedFileName = '';
+
+// Load file list on page load
+document.addEventListener('DOMContentLoaded', function() {
+    refreshFileList();
+});
+
+function refreshFileList() {
+    fetch('/api/csv/files/')
+        .then(response => response.json())
+        .then(data => {
+            const select = document.getElementById('csvFileSelect');
+            select.innerHTML = '<option value="">-- Select a file --</option>';
+            
+            if (data.success && data.files) {
+                data.files.forEach(file => {
+                    const option = document.createElement('option');
+                    option.value = file.name;
+                    option.textContent = `${file.name} (${formatFileSize(file.size)}, ${file.modified})`;
+                    select.appendChild(option);
+                });
+                
+                document.getElementById('fileInfo').textContent = 
+                    `Found ${data.count} CSV files`;
+            } else {
+                document.getElementById('fileInfo').textContent = 
+                    data.message || 'No CSV files found';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading file list:', error);
+            document.getElementById('fileInfo').textContent = 'Error loading files';
+        });
+}
+
+function loadSelectedFile() {
+    const select = document.getElementById('csvFileSelect');
+    const filename = select.value;
+    
+    if (!filename) {
+        document.getElementById('signalsData').style.display = 'none';
+        return;
+    }
+    
+    selectedFileName = filename;
+    
+    // Show loading state
+    document.getElementById('dataTitle').textContent = '⏳ Loading...';
+    document.getElementById('signalsData').style.display = 'block';
+    
+    fetch(`/api/csv/data/?filename=${encodeURIComponent(filename)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                currentData = data.data;
+                filteredData = [...currentData];
+                
+                displayTable(data.headers, data.data);
+                
+                document.getElementById('dataTitle').textContent = `📈 ${filename}`;
+                document.getElementById('dataInfo').textContent = 
+                    `${data.row_count} rows, Delimiter: "${data.delimiter}"`;
+                
+                currentPage = 1;
+                updatePagination();
+            } else {
+                document.getElementById('dataTitle').textContent = '❌ Error';
+                document.getElementById('dataInfo').textContent = data.message;
+                document.getElementById('tableBody').innerHTML = 
+                    '<tr><td colspan="100%" class="text-center text-danger">Error loading data</td></tr>';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading CSV data:', error);
+            document.getElementById('dataTitle').textContent = '❌ Network Error';
+            document.getElementById('dataInfo').textContent = 'Failed to load data';
+        });
+}
+
+function displayTable(headers, data) {
+    const thead = document.getElementById('tableHead');
+    const tbody = document.getElementById('tableBody');
+    
+    // Create headers
+    thead.innerHTML = '';
+    if (headers && headers.length > 0) {
+        const headerRow = document.createElement('tr');
+        headers.forEach(header => {
+            const th = document.createElement('th');
+            th.textContent = header;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+    }
+    
+    // Display current page data
+    displayCurrentPage();
+}
+
+function displayCurrentPage() {
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = '';
+    
+    const startIndex = (currentPage - 1) * rowsPerPage;
+    const endIndex = Math.min(startIndex + rowsPerPage, filteredData.length);
+    
+    for (let i = startIndex; i < endIndex; i++) {
+        const row = filteredData[i];
+        const tr = document.createElement('tr');
+        
+        row.forEach(cell => {
+            const td = document.createElement('td');
+            td.textContent = cell || '';
+            tr.appendChild(td);
+        });
+        
+        tbody.appendChild(tr);
+    }
+    
+    updatePaginationInfo();
+}
+
+function filterTable() {
+    const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+    
+    if (!searchTerm) {
+        filteredData = [...currentData];
+    } else {
+        filteredData = currentData.filter(row => 
+            row.some(cell => 
+                cell && cell.toString().toLowerCase().includes(searchTerm)
+            )
+        );
+    }
+    
+    currentPage = 1;
+    displayCurrentPage();
+    updatePagination();
+}
+
+function updatePagination() {
+    const totalPages = Math.ceil(filteredData.length / rowsPerPage);
+    
+    document.getElementById('prevBtn').disabled = currentPage <= 1;
+    document.getElementById('nextBtn').disabled = currentPage >= totalPages;
+    
+    updatePaginationInfo();
+}
+
+function updatePaginationInfo() {
+    const startIndex = (currentPage - 1) * rowsPerPage + 1;
+    const endIndex = Math.min(currentPage * rowsPerPage, filteredData.length);
+    const total = filteredData.length;
+    
+    document.getElementById('paginationInfo').textContent = 
+        `Showing ${startIndex}-${endIndex} of ${total} rows`;
+}
+
+function previousPage() {
+    if (currentPage > 1) {
+        currentPage--;
+        displayCurrentPage();
+        updatePagination();
+    }
+}
+
+function nextPage() {
+    const totalPages = Math.ceil(filteredData.length / rowsPerPage);
+    if (currentPage < totalPages) {
+        currentPage++;
+        displayCurrentPage();
+        updatePagination();
+    }
+}
+
+function exportToCSV() {
+    if (!filteredData.length) {
+        alert('No data to export');
+        return;
+    }
+    
+    // Get headers
+    const headers = Array.from(document.querySelectorAll('#tableHead th')).map(th => th.textContent);
+    
+    // Create CSV content
+    let csvContent = headers.join(',') + '\n';
+    filteredData.forEach(row => {
+        csvContent += row.map(cell => `"${cell || ''}"`).join(',') + '\n';
+    });
+    
+    // Download
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `filtered_${selectedFileName}`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+}
+
+function downloadOriginal() {
+    if (!selectedFileName) {
+        alert('No file selected');
+        return;
+    }
+    
+    // Create download link for original file
+    window.open(`/api/csv/data/?filename=${encodeURIComponent(selectedFileName)}&download=1`);
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+</script>
+{% endblock %}

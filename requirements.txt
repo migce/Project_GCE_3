@@ -1,4 +1,6 @@
 asgiref==3.9.2
 Django==5.2.6
+MetaTrader5==5.0.5260
+numpy==2.3.3
 sqlparse==0.5.3
 tzdata==2025.2

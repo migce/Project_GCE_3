@@ -1,0 +1,128 @@
+{% extends 'main/base.html' %}
+
+{% block title %}Trading History - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">📈 Trading History</h2>
+        <p class="card-subtitle">Trading operations analysis and statistics</p>
+    </div>
+    
+    <div class="alert alert-info">
+        <strong>Under Development:</strong> This section is under development. 
+        Trading operations history from MetaTrader5 will be displayed here.
+    </div>
+
+    <div class="dashboard-grid">
+        <div class="metric-card">
+            <div class="metric-value">0</div>
+            <div class="metric-label">Total Trades</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">$0.00</div>
+            <div class="metric-label">Total Profit</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">0%</div>
+            <div class="metric-label">Win Rate</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">0</div>
+            <div class="metric-label">Active Positions</div>
+        </div>
+    </div>
+
+    <h3 style="margin-top: 2rem;">🔍 Filters and Search</h3>
+    <div style="background: #f8f9fa; padding: 1.5rem; border-radius: 8px; margin: 1rem 0;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+            <div>
+                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Period:</label>
+                <select style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;">
+                    <option>Last 7 days</option>
+                    <option>Last month</option>
+                    <option>Last 3 months</option>
+                    <option>All time</option>
+                </select>
+            </div>
+            <div>
+                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Instrument:</label>
+                <select style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;">
+                    <option>All instruments</option>
+                    <option>EURUSD</option>
+                    <option>GBPUSD</option>
+                    <option>USDJPY</option>
+                </select>
+            </div>
+            <div>
+                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Operation Type:</label>
+                <select style="width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;">
+                    <option>All operations</option>
+                    <option>Buy</option>
+                    <option>Sell</option>
+                </select>
+            </div>
+            <div style="display: flex; align-items: end;">
+                <button class="btn btn-primary" style="width: 100%;">🔍 Apply Filters</button>
+            </div>
+        </div>
+    </div>
+
+    <h3>📋 История операций</h3>
+    <div style="background: white; border: 1px solid #dee2e6; border-radius: 8px; overflow: hidden;">
+        <table class="table">
+            <thead>
+                <tr style="background: #f8f9fa;">
+                    <th>Дата/Время</th>
+                    <th>Инструмент</th>
+                    <th>Тип</th>
+                    <th>Объем</th>
+                    <th>Цена открытия</th>
+                    <th>Цена закрытия</th>
+                    <th>Прибыль/Убыток</th>
+                    <th>Статус</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="8" style="text-align: center; padding: 3rem; color: #6c757d;">
+                        <div style="font-size: 3rem; margin-bottom: 1rem;">📊</div>
+                        <h4>Нет данных для отображения</h4>
+                        <p>Подключите MetaTrader5 и начните торговлю, чтобы увидеть историю операций</p>
+                        <div style="margin-top: 1.5rem;">
+                            <a href="{% url 'main:system_dashboard' %}" class="btn btn-primary">
+                                ⚙️ Настроить подключение
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">📊 Планируемый функционал</h3>
+    </div>
+    
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;">
+        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
+            <h4>🔄 Автоматическая синхронизация</h4>
+            <p>Загрузка истории сделок из MT5 в реальном времени</p>
+        </div>
+        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
+            <h4>📈 Аналитика и графики</h4>
+            <p>Детальная статистика торговых результатов</p>
+        </div>
+        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
+            <h4>💾 Экспорт данных</h4>
+            <p>Выгрузка отчетов в Excel и PDF форматах</p>
+        </div>
+        <div style="padding: 1rem; background: #f8f9fa; border-radius: 8px;">
+            <h4>🎯 Умные фильтры</h4>
+            <p>Продвинутые возможности поиска и группировки</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
