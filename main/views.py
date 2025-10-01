@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
-from .models import MT5ConnectionSettings, MT5ConnectionLog
+from .models import MT5ConnectionSettings, MT5ConnectionLog, TradingSystem, TimeFrame, DataFile
 from .services.mt5_service import MT5Service
 import sys
 import platform
@@ -10,6 +10,7 @@ import os
 import csv
 import glob
 from pathlib import Path
+import json
 
 # Create your views here.
 
@@ -589,9 +590,13 @@ def raw_signals(request):
     # TradeStation exports directory
     ts_exports_dir = r'C:\TS_EXPORTS'
     
+    # Получаем количество торговых систем
+    trading_systems_count = TradingSystem.objects.count()
+    
     context = {
         'ts_exports_dir': ts_exports_dir,
-        'directory_exists': os.path.exists(ts_exports_dir)
+        'directory_exists': os.path.exists(ts_exports_dir),
+        'trading_systems_count': trading_systems_count
     }
     
     return render(request, 'main/raw_signals.html', context)
@@ -707,3 +712,398 @@ def get_csv_data_api(request):
             'success': False,
             'message': f'Error reading CSV file: {str(e)}'
         })
+
+
+# Trading Systems API
+
+def api_trading_systems(request):
+    """API для получения списка торговых систем"""
+    if request.method == 'GET':
+        try:
+            systems = []
+            for system in TradingSystem.objects.all():
+                system_data = {
+                    'id': system.id,
+                    'system_sid': system.system_sid,
+                    'name': system.name,
+                    'symbol': system.symbol,
+                    'timeframes_count': system.timeframes_count,
+                    'time_offset_minutes': system.time_offset_minutes,
+                    'created_at': system.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'timeframes': []
+                }
+                
+                # Добавляем информацию о таймфреймах
+                for timeframe in system.timeframes.all():
+                    timeframe_data = {
+                        'id': timeframe.id,
+                        'open_column': timeframe.open_column,
+                        'high_column': timeframe.high_column,
+                        'low_column': timeframe.low_column,
+                        'close_column': timeframe.close_column,
+                        'volume_column': timeframe.volume_column,
+                        'datetime_column': timeframe.datetime_column,
+                        'datetime_format': timeframe.datetime_format
+                    }
+                    system_data['timeframes'].append(timeframe_data)
+                
+                systems.append(system_data)
+            
+            return JsonResponse({
+                'success': True,
+                'systems': systems,
+                'count': len(systems)
+            })
+            
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': f'Error getting trading systems: {str(e)}'
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'message': 'Method not allowed'
+    })
+
+
+def api_trading_system_detail(request, system_id):
+    """API для получения детальной информации о торговой системе"""
+    if request.method == 'GET':
+        try:
+            system = TradingSystem.objects.get(id=system_id)
+            
+            system_data = {
+                'id': system.id,
+                'system_sid': system.system_sid,
+                'name': system.name,
+                'symbol': system.symbol,
+                'timeframes_count': system.timeframes_count,
+                'time_offset_minutes': system.time_offset_minutes,
+                'created_at': system.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                'timeframes': [],
+                'data_files': []
+            }
+            
+            # Добавляем информацию о таймфреймах
+            for timeframe in system.timeframes.all():
+                timeframe_data = {
+                    'id': timeframe.id,
+                    'open_column': timeframe.open_column,
+                    'high_column': timeframe.high_column,
+                    'low_column': timeframe.low_column,
+                    'close_column': timeframe.close_column,
+                    'volume_column': timeframe.volume_column,
+                    'datetime_column': timeframe.datetime_column,
+                    'datetime_format': timeframe.datetime_format
+                }
+                system_data['timeframes'].append(timeframe_data)
+            
+            # Добавляем информацию о файлах данных
+            for data_file in system.data_files.all():
+                file_data = {
+                    'id': data_file.id,
+                    'filename': data_file.filename,
+                    'file_path': data_file.file_path,
+                    'is_processed': data_file.is_processed,
+                    'created_at': data_file.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'processed_at': data_file.processed_at.strftime('%Y-%m-%d %H:%M:%S') if data_file.processed_at else None,
+                    'json_data': data_file.json_data
+                }
+                system_data['data_files'].append(file_data)
+            
+            return JsonResponse({
+                'success': True,
+                'system': system_data
+            })
+            
+        except TradingSystem.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Trading system not found'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': f'Error getting trading system: {str(e)}'
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'message': 'Method not allowed'
+    })
+
+
+def api_validate_csv_for_system(request, system_id):
+    """API для валидации CSV файла согласно конфигурации торговой системы"""
+    if request.method == 'POST':
+        try:
+            # Получаем торговую систему
+            system = TradingSystem.objects.get(id=system_id)
+            
+            # Получаем имя файла из запроса
+            filename = request.POST.get('filename')
+            if not filename:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Filename not provided'
+                })
+            
+            # Полный путь к файлу
+            file_path = os.path.join(r'C:\TS_EXPORTS', filename)
+            
+            if not os.path.exists(file_path):
+                return JsonResponse({
+                    'success': False,
+                    'message': f'File not found: {filename}'
+                })
+            
+            # Читаем CSV файл
+            validation_results = []
+            csv_data = []
+            
+            # Определяем разделитель
+            delimiter = ','
+            with open(file_path, 'r', encoding='utf-8-sig') as file:
+                sample = file.read(1024)
+                sniffer = csv.Sniffer()
+                try:
+                    delimiter = sniffer.sniff(sample).delimiter
+                except:
+                    delimiter = ','
+            
+            # Читаем файл
+            with open(file_path, 'r', encoding='utf-8-sig') as file:
+                reader = csv.reader(file, delimiter=delimiter)
+                
+                # Читаем заголовки
+                try:
+                    headers = next(reader)
+                except StopIteration:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'CSV file is empty'
+                    })
+                
+                # Валидируем каждый таймфрейм
+                for timeframe in system.timeframes.all():
+                    validation_result = {
+                        'timeframe_id': timeframe.id,
+                        'valid': True,
+                        'errors': [],
+                        'warnings': []
+                    }
+                    
+                    # Проверяем обязательные колонки
+                    required_columns = []
+                    if timeframe.open_column:
+                        required_columns.append(timeframe.open_column)
+                    if timeframe.high_column:
+                        required_columns.append(timeframe.high_column)
+                    if timeframe.low_column:
+                        required_columns.append(timeframe.low_column)
+                    if timeframe.close_column:
+                        required_columns.append(timeframe.close_column)
+                    if timeframe.datetime_column:
+                        required_columns.append(timeframe.datetime_column)
+                    
+                    # Проверяем наличие колонок в заголовках
+                    missing_columns = []
+                    for col in required_columns:
+                        if col not in headers:
+                            missing_columns.append(col)
+                    
+                    if missing_columns:
+                        validation_result['valid'] = False
+                        validation_result['errors'].append(f'Missing columns: {", ".join(missing_columns)}')
+                    
+                    # Проверяем объемы (опционально)
+                    if timeframe.volume_column and timeframe.volume_column not in headers:
+                        validation_result['warnings'].append(f'Volume column "{timeframe.volume_column}" not found')
+                    
+                    validation_results.append(validation_result)
+                
+                # Читаем первые несколько строк для примера
+                file.seek(0)
+                reader = csv.reader(file, delimiter=delimiter)
+                next(reader)  # Пропускаем заголовки
+                
+                row_count = 0
+                for row in reader:
+                    if row_count >= 5:  # Читаем только первые 5 строк для примера
+                        break
+                    if row:
+                        csv_data.append(row)
+                        row_count += 1
+            
+            return JsonResponse({
+                'success': True,
+                'filename': filename,
+                'system_name': system.name,
+                'headers': headers,
+                'sample_data': csv_data,
+                'validation_results': validation_results,
+                'is_valid': all(result['valid'] for result in validation_results)
+            })
+            
+        except TradingSystem.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Trading system not found'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': f'Error validating CSV: {str(e)}'
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'message': 'Method not allowed'
+    })
+
+
+def api_process_csv_to_json(request, system_id):
+    """API для обработки CSV файла и конвертации в JSON согласно конфигурации системы"""
+    if request.method == 'POST':
+        try:
+            # Получаем торговую систему
+            system = TradingSystem.objects.get(id=system_id)
+            
+            # Получаем имя файла из запроса
+            filename = request.POST.get('filename')
+            if not filename:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Filename not provided'
+                })
+            
+            # Полный путь к файлу
+            file_path = os.path.join(r'C:\TS_EXPORTS', filename)
+            
+            if not os.path.exists(file_path):
+                return JsonResponse({
+                    'success': False,
+                    'message': f'File not found: {filename}'
+                })
+            
+            # Определяем разделитель
+            delimiter = ','
+            with open(file_path, 'r', encoding='utf-8-sig') as file:
+                sample = file.read(1024)
+                sniffer = csv.Sniffer()
+                try:
+                    delimiter = sniffer.sniff(sample).delimiter
+                except:
+                    delimiter = ','
+            
+            # Обрабатываем файл
+            processed_data = {
+                'system_info': {
+                    'system_sid': system.system_sid,
+                    'name': system.name,
+                    'symbol': system.symbol,
+                    'timeframes_count': system.timeframes_count,
+                    'time_offset_minutes': system.time_offset_minutes
+                },
+                'timeframes': {}
+            }
+            
+            # Читаем CSV файл
+            with open(file_path, 'r', encoding='utf-8-sig') as file:
+                reader = csv.DictReader(file, delimiter=delimiter)
+                
+                # Обрабатываем каждый таймфрейм
+                for timeframe in system.timeframes.all():
+                    timeframe_data = []
+                    file.seek(0)
+                    reader = csv.DictReader(file, delimiter=delimiter)
+                    
+                    for row in reader:
+                        if not any(row.values()):  # Пропускаем пустые строки
+                            continue
+                        
+                        try:
+                            # Формируем данные OHLC
+                            ohlc_data = {}
+                            
+                            if timeframe.datetime_column and timeframe.datetime_column in row:
+                                ohlc_data['datetime'] = row[timeframe.datetime_column]
+                            
+                            if timeframe.open_column and timeframe.open_column in row:
+                                ohlc_data['open'] = float(row[timeframe.open_column]) if row[timeframe.open_column] else None
+                            
+                            if timeframe.high_column and timeframe.high_column in row:
+                                ohlc_data['high'] = float(row[timeframe.high_column]) if row[timeframe.high_column] else None
+                            
+                            if timeframe.low_column and timeframe.low_column in row:
+                                ohlc_data['low'] = float(row[timeframe.low_column]) if row[timeframe.low_column] else None
+                            
+                            if timeframe.close_column and timeframe.close_column in row:
+                                ohlc_data['close'] = float(row[timeframe.close_column]) if row[timeframe.close_column] else None
+                            
+                            if timeframe.volume_column and timeframe.volume_column in row:
+                                ohlc_data['volume'] = float(row[timeframe.volume_column]) if row[timeframe.volume_column] else None
+                            
+                            timeframe_data.append(ohlc_data)
+                            
+                        except (ValueError, TypeError) as e:
+                            # Пропускаем строки с ошибками преобразования
+                            continue
+                    
+                    processed_data['timeframes'][f'timeframe_{timeframe.id}'] = {
+                        'config': {
+                            'open_column': timeframe.open_column,
+                            'high_column': timeframe.high_column,
+                            'low_column': timeframe.low_column,
+                            'close_column': timeframe.close_column,
+                            'volume_column': timeframe.volume_column,
+                            'datetime_column': timeframe.datetime_column,
+                            'datetime_format': timeframe.datetime_format
+                        },
+                        'data': timeframe_data
+                    }
+            
+            # Сохраняем обработанный файл в базу данных
+            data_file, created = DataFile.objects.get_or_create(
+                trading_system=system,
+                filename=filename,
+                defaults={
+                    'file_path': file_path,
+                    'json_data': processed_data,
+                    'is_processed': True,
+                    'processed_at': timezone.now()
+                }
+            )
+            
+            if not created:
+                # Обновляем существующий файл
+                data_file.json_data = processed_data
+                data_file.is_processed = True
+                data_file.processed_at = timezone.now()
+                data_file.save()
+            
+            return JsonResponse({
+                'success': True,
+                'filename': filename,
+                'system_name': system.name,
+                'processed_data': processed_data,
+                'data_file_id': data_file.id,
+                'total_records': sum(len(tf['data']) for tf in processed_data['timeframes'].values())
+            })
+            
+        except TradingSystem.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Trading system not found'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': f'Error processing CSV: {str(e)}'
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'message': 'Method not allowed'
+    })

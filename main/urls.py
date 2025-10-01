@@ -16,4 +16,10 @@ urlpatterns = [
     path('api/monitoring/stop/', views.stop_monitoring_service, name='stop_monitoring'),
     path('api/csv/files/', views.get_csv_files_api, name='csv_files_api'),
     path('api/csv/data/', views.get_csv_data_api, name='csv_data_api'),
+    
+    # Trading Systems API
+    path('api/trading-systems/', views.api_trading_systems, name='api_trading_systems'),
+    path('api/trading-systems/<int:system_id>/', views.api_trading_system_detail, name='api_trading_system_detail'),
+    path('api/trading-systems/<int:system_id>/validate-csv/', views.api_validate_csv_for_system, name='api_validate_csv'),
+    path('api/trading-systems/<int:system_id>/process-csv/', views.api_process_csv_to_json, name='api_process_csv'),
 ]

@@ -6,10 +6,39 @@
 {% block content %}
 <div class="page-header">
     <h1>📊 Raw Signals</h1>
-    <p>TradeStation CSV Exports Analysis</p>
+    <p>TradeStation CSV Exports Analysis with Trading System Integration</p>
 </div>
 
 <div class="signals-controls">
+    <!-- Trading Systems Section -->
+    <div class="card mb-3">
+        <div class="card-header">
+            <h3>⚙️ Trading Systems</h3>
+            <div class="header-actions">
+                <button class="btn btn-secondary" onclick="loadTradingSystems()">🔄 Refresh Systems</button>
+                <a href="/admin/main/tradingsystem/" target="_blank" class="btn btn-primary">➕ Manage Systems</a>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="trading-system-selector">
+                <label for="tradingSystemSelect">Select Trading System:</label>
+                <select id="tradingSystemSelect" class="form-control" onchange="loadTradingSystem()">
+                    <option value="">-- Select a trading system --</option>
+                </select>
+                <div class="system-info mt-2">
+                    <div id="systemInfo" class="text-muted">No system selected</div>
+                </div>
+            </div>
+            
+            <!-- System Details -->
+            <div id="systemDetails" class="mt-3" style="display: none;">
+                <h5>📊 System Configuration</h5>
+                <div id="systemConfigInfo"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CSV Files Section -->
     <div class="card">
         <div class="card-header">
             <h3>📁 CSV Files</h3>
@@ -30,8 +59,18 @@
                 <select id="csvFileSelect" class="form-control" onchange="loadSelectedFile()">
                     <option value="">-- Select a file --</option>
                 </select>
-                <div class="file-info">
+                <div class="file-info mt-2">
                     <span id="fileInfo" class="text-muted">No file selected</span>
+                </div>
+            </div>
+            
+            <!-- Validation Results -->
+            <div id="validationResults" class="mt-3" style="display: none;">
+                <h5>✅ Validation Results</h5>
+                <div id="validationContent"></div>
+                <div class="validation-actions mt-2">
+                    <button class="btn btn-success" onclick="processCSVFile()" id="processBtn" disabled>🔄 Process CSV</button>
+                    <button class="btn btn-info" onclick="viewProcessedData()" id="viewProcessedBtn" style="display: none;">� View Processed Data</button>
                 </div>
             </div>
         </div>
@@ -88,11 +127,290 @@ let filteredData = [];
 let currentPage = 1;
 const rowsPerPage = 50;
 let selectedFileName = '';
+let selectedTradingSystem = null;
+let validationResult = null;
+let processedData = null;
+let tradingSystems = [];
 
-// Load file list on page load
+// Load file list and trading systems on page load
 document.addEventListener('DOMContentLoaded', function() {
+    loadTradingSystems();
     refreshFileList();
 });
+
+function loadTradingSystems() {
+    fetch('/api/trading-systems/')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                tradingSystems = data.systems;
+                updateTradingSystemSelect();
+            } else {
+                console.error('Error loading trading systems:', data.message);
+                showAlert('error', 'Failed to load trading systems: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('error', 'Network error loading trading systems');
+        });
+}
+
+function updateTradingSystemSelect() {
+    const select = document.getElementById('tradingSystemSelect');
+    select.innerHTML = '<option value="">-- Select a trading system --</option>';
+    
+    tradingSystems.forEach(system => {
+        const option = document.createElement('option');
+        option.value = system.id;
+        option.textContent = `${system.name} (${system.symbol}) - ${system.timeframes_count} timeframes`;
+        select.appendChild(option);
+    });
+}
+
+function loadTradingSystem() {
+    const select = document.getElementById('tradingSystemSelect');
+    const systemId = select.value;
+    
+    if (systemId) {
+        selectedTradingSystem = tradingSystems.find(s => s.id == systemId);
+        updateSystemInfo();
+        
+        // Show system details
+        document.getElementById('systemDetails').style.display = 'block';
+        showSystemConfiguration();
+        
+        // Clear previous validation results
+        hideValidationResults();
+        hideProcessingActions();
+        
+        // Re-validate current file if selected
+        if (selectedFileName) {
+            validateCurrentFile();
+        }
+    } else {
+        selectedTradingSystem = null;
+        updateSystemInfo();
+        document.getElementById('systemDetails').style.display = 'none';
+        hideValidationResults();
+        hideProcessingActions();
+    }
+}
+
+function updateSystemInfo() {
+    const infoDiv = document.getElementById('systemInfo');
+    
+    if (selectedTradingSystem) {
+        infoDiv.innerHTML = `
+            <div class="system-details">
+                <strong>System:</strong> ${selectedTradingSystem.name}<br>
+                <strong>Symbol:</strong> ${selectedTradingSystem.symbol}<br>
+                <strong>System ID:</strong> ${selectedTradingSystem.system_sid}<br>
+                <strong>Timeframes:</strong> ${selectedTradingSystem.timeframes_count}<br>
+                <strong>Time Offset:</strong> ${selectedTradingSystem.time_offset_minutes} minutes<br>
+                <strong>Created:</strong> ${selectedTradingSystem.created_at}
+            </div>
+        `;
+    } else {
+        infoDiv.textContent = 'No system selected';
+    }
+}
+
+function validateCurrentFile() {
+    if (!selectedTradingSystem || !selectedFileName) {
+        return;
+    }
+    
+    showAlert('info', 'Validating CSV file against trading system configuration...');
+    
+    const formData = new FormData();
+    formData.append('filename', selectedFileName);
+    
+    fetch(`/api/trading-systems/${selectedTradingSystem.id}/validate-csv/`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideAlert();
+        
+        if (data.success) {
+            showValidationResults(data);
+            if (data.is_valid) {
+                showProcessingActions();
+            }
+        } else {
+            showAlert('error', 'Validation failed: ' + data.message);
+        }
+    })
+    .catch(error => {
+        hideAlert();
+        console.error('Error:', error);
+        showAlert('error', 'Network error during validation');
+    });
+}
+
+function showValidationResults(data) {
+    const resultsDiv = document.getElementById('validationResults');
+    const summaryDiv = document.getElementById('validationSummary');
+    const detailsDiv = document.getElementById('validationDetails');
+    
+    // Summary
+    const isValid = data.is_valid;
+    summaryDiv.innerHTML = `
+        <div class="alert ${isValid ? 'alert-success' : 'alert-danger'}">
+            <strong>${isValid ? '✅ Valid' : '❌ Invalid'}:</strong> 
+            File ${isValid ? 'is compatible' : 'has issues'} with trading system "${selectedTradingSystem.name}"
+        </div>
+    `;
+    
+    // Details
+    let detailsHtml = '<div class="validation-details">';
+    
+    data.validation_results.forEach((result, index) => {
+        const statusIcon = result.valid ? '✅' : '❌';
+        detailsHtml += `
+            <div class="timeframe-validation ${result.valid ? 'valid' : 'invalid'}">
+                <h6>${statusIcon} Timeframe ${index + 1}</h6>
+        `;
+        
+        if (result.errors.length > 0) {
+            detailsHtml += '<div class="errors"><strong>Errors:</strong><ul>';
+            result.errors.forEach(error => {
+                detailsHtml += `<li class="text-danger">${error}</li>`;
+            });
+            detailsHtml += '</ul></div>';
+        }
+        
+        if (result.warnings.length > 0) {
+            detailsHtml += '<div class="warnings"><strong>Warnings:</strong><ul>';
+            result.warnings.forEach(warning => {
+                detailsHtml += `<li class="text-warning">${warning}</li>`;
+            });
+            detailsHtml += '</ul></div>';
+        }
+        
+        detailsHtml += '</div>';
+    });
+    
+    detailsHtml += '</div>';
+    detailsDiv.innerHTML = detailsHtml;
+    
+    resultsDiv.style.display = 'block';
+}
+
+function hideValidationResults() {
+    document.getElementById('validationResults').style.display = 'none';
+}
+
+function showProcessingActions() {
+    document.getElementById('processingActions').style.display = 'block';
+}
+
+function hideProcessingActions() {
+    document.getElementById('processingActions').style.display = 'none';
+}
+
+function processCSVFile() {
+    if (!selectedTradingSystem || !selectedFileName) {
+        showAlert('error', 'Please select both a trading system and CSV file');
+        return;
+    }
+    
+    showAlert('info', 'Processing CSV file to JSON format...');
+    
+    const formData = new FormData();
+    formData.append('filename', selectedFileName);
+    
+    fetch(`/api/trading-systems/${selectedTradingSystem.id}/process-csv/`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideAlert();
+        
+        if (data.success) {
+            showAlert('success', `Successfully processed ${data.total_records} records from ${data.filename}`);
+            
+            // Update file info to show it's been processed
+            const fileInfo = document.getElementById('fileInfo');
+            fileInfo.innerHTML += '<br><span class="text-success">✅ Processed to JSON</span>';
+        } else {
+            showAlert('error', 'Processing failed: ' + data.message);
+        }
+    })
+    .catch(error => {
+        hideAlert();
+        console.error('Error:', error);
+        showAlert('error', 'Network error during processing');
+    });
+}
+
+function downloadProcessedData() {
+    if (!selectedTradingSystem || !selectedFileName) {
+        showAlert('error', 'Please select both a trading system and CSV file');
+        return;
+    }
+    
+    // Get the processed data
+    fetch(`/api/trading-systems/${selectedTradingSystem.id}/`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const processedFile = data.system.data_files.find(file => file.filename === selectedFileName);
+                if (processedFile && processedFile.json_data) {
+                    // Create and download JSON file
+                    const jsonContent = JSON.stringify(processedFile.json_data, null, 2);
+                    const blob = new Blob([jsonContent], { type: 'application/json' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `processed_${selectedFileName.replace('.csv', '.json')}`;
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                } else {
+                    showAlert('error', 'No processed data found for this file');
+                }
+            } else {
+                showAlert('error', 'Failed to get processed data: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('error', 'Network error getting processed data');
+        });
+}
+
+function showAlert(type, message) {
+    // Remove existing alerts
+    const existingAlert = document.querySelector('.dynamic-alert');
+    if (existingAlert) {
+        existingAlert.remove();
+    }
+    
+    const alertClass = type === 'error' ? 'alert-danger' : 
+                     type === 'success' ? 'alert-success' : 
+                     type === 'warning' ? 'alert-warning' : 'alert-info';
+    
+    const alertHtml = `
+        <div class="alert ${alertClass} alert-dismissible fade show dynamic-alert" role="alert">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+    `;
+    
+    // Insert at the top of the page content
+    const pageHeader = document.querySelector('.page-header');
+    pageHeader.insertAdjacentHTML('afterend', alertHtml);
+}
+
+function hideAlert() {
+    const existingAlert = document.querySelector('.dynamic-alert');
+    if (existingAlert) {
+        existingAlert.remove();
+    }
+}
 
 function refreshFileList() {
     fetch('/api/csv/files/')
@@ -105,15 +423,18 @@ function refreshFileList() {
                 data.files.forEach(file => {
                     const option = document.createElement('option');
                     option.value = file.name;
-                    option.textContent = `${file.name} (${formatFileSize(file.size)}, ${file.modified})`;
+                    option.textContent = `${file.name} (${formatFileSize(file.size)}, ${new Date(file.modified).toLocaleDateString()})`;
+                    
+                    // Add data attributes for later use
+                    option.setAttribute('data-size', file.size);
+                    option.setAttribute('data-modified', file.modified);
+                    
                     select.appendChild(option);
                 });
                 
-                document.getElementById('fileInfo').textContent = 
-                    `Found ${data.count} CSV files`;
+                document.getElementById('fileInfo').textContent = `${data.files.length} files found`;
             } else {
-                document.getElementById('fileInfo').textContent = 
-                    data.message || 'No CSV files found';
+                document.getElementById('fileInfo').textContent = 'No CSV files found';
             }
         })
         .catch(error => {
@@ -128,10 +449,31 @@ function loadSelectedFile() {
     
     if (!filename) {
         document.getElementById('signalsData').style.display = 'none';
+        selectedFileName = '';
+        hideValidationResults();
         return;
     }
     
     selectedFileName = filename;
+    
+    // Update file info
+    const selectedOption = select.options[select.selectedIndex];
+    const fileSize = selectedOption.getAttribute('data-size');
+    const fileModified = selectedOption.getAttribute('data-modified');
+    
+    document.getElementById('fileInfo').innerHTML = `
+        <strong>File:</strong> ${filename}<br>
+        <strong>Size:</strong> ${formatFileSize(parseInt(fileSize))}<br>
+        <strong>Modified:</strong> ${new Date(fileModified).toLocaleString()}
+    `;
+    
+    // Clear previous validation results
+    hideValidationResults();
+    
+    // If trading system is selected, validate the file
+    if (selectedTradingSystem) {
+        validateCurrentFile();
+    }
     
     // Show loading state
     document.getElementById('dataTitle').textContent = '⏳ Loading...';
@@ -152,6 +494,11 @@ function loadSelectedFile() {
                 
                 currentPage = 1;
                 updatePagination();
+                
+                // Validate against selected trading system if available
+                if (selectedTradingSystem) {
+                    validateCurrentFile();
+                }
             } else {
                 document.getElementById('dataTitle').textContent = '❌ Error';
                 document.getElementById('dataInfo').textContent = data.message;
@@ -303,6 +650,235 @@ function formatFileSize(bytes) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function showSystemConfiguration() {
+    if (!selectedTradingSystem) return;
+    
+    const configDiv = document.getElementById('systemConfigInfo');
+    let configHtml = '<div class="timeframes-config">';
+    
+    selectedTradingSystem.timeframes.forEach((timeframe, index) => {
+        configHtml += `
+            <div class="timeframe-item">
+                <h6>Timeframe ${index + 1}</h6>
+                <div class="config-details">
+                    <span><strong>Open:</strong> ${timeframe.open_column || 'N/A'}</span>
+                    <span><strong>High:</strong> ${timeframe.high_column || 'N/A'}</span>
+                    <span><strong>Low:</strong> ${timeframe.low_column || 'N/A'}</span>
+                    <span><strong>Close:</strong> ${timeframe.close_column || 'N/A'}</span>
+                    <span><strong>Volume:</strong> ${timeframe.volume_column || 'N/A'}</span>
+                    <span><strong>DateTime:</strong> ${timeframe.datetime_column || 'N/A'}</span>
+                </div>
+            </div>
+        `;
+    });
+    
+    configHtml += '</div>';
+    configDiv.innerHTML = configHtml;
+}
+
+function showValidationResults(data) {
+    const resultsDiv = document.getElementById('validationResults');
+    const contentDiv = document.getElementById('validationContent');
+    
+    let resultsHtml = `
+        <div class="validation-summary">
+            <div class="alert ${data.is_valid ? 'alert-success' : 'alert-danger'}">
+                <strong>Validation ${data.is_valid ? 'Passed' : 'Failed'}</strong>
+                ${data.is_valid ? '✅ CSV file is compatible with the selected trading system' : '❌ CSV file has validation errors'}
+            </div>
+        </div>
+    `;
+    
+    if (data.headers && data.headers.length > 0) {
+        resultsHtml += `
+            <div class="headers-info">
+                <h6>CSV Headers (${data.headers.length})</h6>
+                <div class="headers-list">
+                    ${data.headers.map(header => `<span class="badge badge-secondary">${header}</span>`).join(' ')}
+                </div>
+            </div>
+        `;
+    }
+    
+    if (data.validation_results && data.validation_results.length > 0) {
+        resultsHtml += '<div class="timeframe-validation">';
+        
+        data.validation_results.forEach((result, index) => {
+            const statusClass = result.valid ? 'success' : 'danger';
+            const statusIcon = result.valid ? '✅' : '❌';
+            
+            resultsHtml += `
+                <div class="validation-item alert alert-${statusClass}">
+                    <h6>${statusIcon} Timeframe ${index + 1} ${result.valid ? 'Valid' : 'Invalid'}</h6>
+            `;
+            
+            if (result.errors && result.errors.length > 0) {
+                resultsHtml += '<div class="errors"><strong>Errors:</strong><ul>';
+                result.errors.forEach(error => {
+                    resultsHtml += `<li class="text-danger">${error}</li>`;
+                });
+                resultsHtml += '</ul></div>';
+            }
+            
+            if (result.warnings && result.warnings.length > 0) {
+                resultsHtml += '<div class="warnings"><strong>Warnings:</strong><ul>';
+                result.warnings.forEach(warning => {
+                    resultsHtml += `<li class="text-warning">${warning}</li>`;
+                });
+                resultsHtml += '</ul></div>';
+            }
+            
+            resultsHtml += '</div>';
+        });
+        
+        resultsHtml += '</div>';
+    }
+    
+    contentDiv.innerHTML = resultsHtml;
+    resultsDiv.style.display = 'block';
+    
+    // Update process button state
+    const processBtn = document.getElementById('processBtn');
+    processBtn.disabled = !data.is_valid;
+}
+
+function hideValidationResults() {
+    document.getElementById('validationResults').style.display = 'none';
+}
+
+function processCSVFile() {
+    if (!selectedTradingSystem || !selectedFileName) {
+        showAlert('error', 'Please select both a trading system and CSV file');
+        return;
+    }
+    
+    showAlert('info', 'Processing CSV file to JSON format...');
+    
+    const formData = new FormData();
+    formData.append('filename', selectedFileName);
+    
+    fetch(`/api/trading-systems/${selectedTradingSystem.id}/process-csv/`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideAlert();
+        
+        if (data.success) {
+            processedData = data.processed_data;
+            showAlert('success', `Successfully processed ${data.total_records} records from ${data.filename}`);
+            
+            // Show view processed data button
+            document.getElementById('viewProcessedBtn').style.display = 'inline-block';
+        } else {
+            showAlert('error', 'Processing failed: ' + data.message);
+        }
+    })
+    .catch(error => {
+        hideAlert();
+        console.error('Error:', error);
+        showAlert('error', 'Network error during processing');
+    });
+}
+
+function viewProcessedData() {
+    if (!processedData) {
+        showAlert('error', 'No processed data available');
+        return;
+    }
+    
+    // Create a summary view of processed data
+    const systemInfo = processedData.system_info;
+    const timeframes = processedData.timeframes;
+    
+    let summaryHtml = `
+        <div class="processed-data-summary">
+            <h4>📊 Processed Data Summary</h4>
+            <div class="system-summary">
+                <strong>System:</strong> ${systemInfo.name} (${systemInfo.symbol})<br>
+                <strong>System ID:</strong> ${systemInfo.system_sid}<br>
+                <strong>Timeframes:</strong> ${systemInfo.timeframes_count}
+            </div>
+            <div class="timeframes-summary">
+    `;
+    
+    Object.keys(timeframes).forEach(timeframeKey => {
+        const tf = timeframes[timeframeKey];
+        summaryHtml += `
+            <div class="timeframe-summary">
+                <h6>${timeframeKey}</h6>
+                <p>Records: ${tf.data.length} | Valid: ${tf.statistics.valid_rows} | Invalid: ${tf.statistics.invalid_rows}</p>
+            </div>
+        `;
+    });
+    
+    summaryHtml += '</div></div>';
+    
+    // Show in a modal or replace current data view
+    const dataDiv = document.getElementById('signalsData');
+    dataDiv.innerHTML = summaryHtml;
+    dataDiv.style.display = 'block';
+}
+
+function showAlert(type, message) {
+    // Remove existing alerts
+    hideAlert();
+    
+    const alertDiv = document.createElement('div');
+    alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+    alertDiv.innerHTML = `
+        ${message}
+        <button type="button" class="close" onclick="hideAlert()">
+            <span>&times;</span>
+        </button>
+    `;
+    alertDiv.id = 'dynamicAlert';
+    
+    // Insert at the top of the content
+    const content = document.querySelector('.signals-controls');
+    content.insertBefore(alertDiv, content.firstChild);
+}
+
+function hideAlert() {
+    const existingAlert = document.getElementById('dynamicAlert');
+    if (existingAlert) {
+        existingAlert.remove();
+    }
+}
+
+function validateCurrentFile() {
+    if (!selectedTradingSystem || !selectedFileName) {
+        return;
+    }
+    
+    showAlert('info', 'Validating CSV file against trading system configuration...');
+    
+    const formData = new FormData();
+    formData.append('filename', selectedFileName);
+    
+    fetch(`/api/trading-systems/${selectedTradingSystem.id}/validate-csv/`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideAlert();
+        
+        if (data.success) {
+            validationResult = data;
+            showValidationResults(data);
+        } else {
+            showAlert('error', 'Validation failed: ' + data.message);
+        }
+    })
+    .catch(error => {
+        hideAlert();
+        console.error('Error:', error);
+        showAlert('error', 'Network error during validation');
+    });
 }
 </script>
 {% endblock %}

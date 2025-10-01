@@ -358,3 +358,244 @@ class MT5MonitoringSettings(models.Model):
             }
         )
         return settings
+
+
+class TradingSystem(models.Model):
+    """Модель для настройки торговых систем TradeStation"""
+    
+    # Идентификатор системы
+    system_sid = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name="System ID",
+        help_text="Краткое название системы (например: DOTBIN, TestSys)"
+    )
+    
+    # Название системы
+    name = models.CharField(
+        max_length=200,
+        verbose_name="Название системы",
+        help_text="Полное описательное название торговой системы"
+    )
+    
+    # Валютная пара
+    symbol = models.CharField(
+        max_length=20,
+        verbose_name="Валютная пара",
+        help_text="Торговая пара (например: EURUSD, GBPUSD)",
+        default="EURUSD"
+    )
+    
+    # Количество уровней таймфреймов
+    timeframes_count = models.PositiveIntegerField(
+        verbose_name="Количество таймфреймов",
+        help_text="Сколько разных таймфреймов использует система",
+        default=1
+    )
+    
+    # Сдвиг времени
+    time_offset_minutes = models.IntegerField(
+        verbose_name="Сдвиг времени (минуты)",
+        help_text="Сдвиг времени в минутах (может быть отрицательным)",
+        default=0
+    )
+    
+    # Активность системы
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Активна",
+        help_text="Обрабатывать ли данные этой системы"
+    )
+    
+    # Дополнительная информация
+    description = models.TextField(
+        blank=True,
+        verbose_name="Описание",
+        help_text="Подробное описание торговой системы"
+    )
+    
+    # Метаданные
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создано"
+    )
+    
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Обновлено"
+    )
+    
+    class Meta:
+        verbose_name = "Торговая система"
+        verbose_name_plural = "Торговые системы"
+        ordering = ['system_sid']
+    
+    def __str__(self):
+        return f"{self.system_sid} - {self.symbol} ({self.timeframes_count} TF)"
+    
+    def get_expected_files_count(self):
+        """Возвращает ожидаемое количество файлов для системы"""
+        return self.timeframes_count
+    
+    def get_file_pattern(self):
+        """Возвращает паттерн имён файлов для системы"""
+        return f"collector_{self.system_sid}_{self.symbol}_*.csv"
+
+
+class TimeFrame(models.Model):
+    """Модель для описания таймфреймов торговой системы"""
+    
+    TIMEFRAME_CHOICES = [
+        ('M1', '1 Minute'),
+        ('M2', '2 Minutes'),
+        ('M5', '5 Minutes'),
+        ('M15', '15 Minutes'),
+        ('M30', '30 Minutes'),
+        ('H1', '1 Hour'),
+        ('H4', '4 Hours'),
+        ('D1', '1 Day'),
+        ('W1', '1 Week'),
+        ('MN1', '1 Month'),
+    ]
+    
+    # Связь с торговой системой
+    trading_system = models.ForeignKey(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='timeframes',
+        verbose_name="Торговая система"
+    )
+    
+    # Таймфрейм
+    timeframe = models.CharField(
+        max_length=10,
+        choices=TIMEFRAME_CHOICES,
+        verbose_name="Таймфрейм"
+    )
+    
+    # Уровень важности (для сортировки)
+    level = models.PositiveIntegerField(
+        verbose_name="Уровень",
+        help_text="Уровень важности таймфрейма (1 - самый важный)"
+    )
+    
+    # Активность
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Активен"
+    )
+    
+    class Meta:
+        verbose_name = "Таймфрейм"
+        verbose_name_plural = "Таймфреймы"
+        unique_together = ['trading_system', 'timeframe']
+        ordering = ['trading_system', 'level']
+    
+    def __str__(self):
+        return f"{self.trading_system.system_sid} - {self.timeframe} (L{self.level})"
+    
+    def get_filename_pattern(self):
+        """Возвращает паттерн имени файла для данного таймфрейма"""
+        return f"collector_{self.trading_system.system_sid}_{self.trading_system.symbol}_{self.timeframe}.csv"
+
+
+class DataFile(models.Model):
+    """Модель для отслеживания обработанных файлов данных"""
+    
+    STATUS_CHOICES = [
+        ('pending', 'Ожидает обработки'),
+        ('processing', 'Обрабатывается'),
+        ('completed', 'Обработан'),
+        ('error', 'Ошибка'),
+        ('skipped', 'Пропущен'),
+    ]
+    
+    # Связь с торговой системой
+    trading_system = models.ForeignKey(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='data_files',
+        verbose_name="Торговая система"
+    )
+    
+    # Связь с таймфреймом
+    timeframe = models.ForeignKey(
+        TimeFrame,
+        on_delete=models.CASCADE,
+        related_name='data_files',
+        verbose_name="Таймфрейм",
+        null=True,
+        blank=True
+    )
+    
+    # Информация о файле
+    filename = models.CharField(
+        max_length=255,
+        verbose_name="Имя файла"
+    )
+    
+    file_path = models.CharField(
+        max_length=500,
+        verbose_name="Путь к файлу"
+    )
+    
+    file_size = models.PositiveIntegerField(
+        verbose_name="Размер файла (байт)",
+        null=True,
+        blank=True
+    )
+    
+    file_modified = models.DateTimeField(
+        verbose_name="Дата изменения файла",
+        null=True,
+        blank=True
+    )
+    
+    # Статус обработки
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        verbose_name="Статус"
+    )
+    
+    # Результаты обработки
+    rows_processed = models.PositiveIntegerField(
+        verbose_name="Обработано строк",
+        null=True,
+        blank=True
+    )
+    
+    error_message = models.TextField(
+        blank=True,
+        verbose_name="Сообщение об ошибке"
+    )
+    
+    # JSON данные
+    json_data = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="JSON данные",
+        help_text="Преобразованные данные в JSON формате"
+    )
+    
+    # Метаданные
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создано"
+    )
+    
+    processed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Обработано"
+    )
+    
+    class Meta:
+        verbose_name = "Файл данных"
+        verbose_name_plural = "Файлы данных"
+        unique_together = ['trading_system', 'filename']
+        ordering = ['-file_modified', 'filename']
+    
+    def __str__(self):
+        return f"{self.trading_system.system_sid} - {self.filename} ({self.status})"

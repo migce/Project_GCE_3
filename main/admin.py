@@ -6,7 +6,10 @@ from .models import (
     MT5ConnectionSettings, 
     MT5ConnectionLog, 
     MT5ConnectionHealth, 
-    MT5MonitoringSettings
+    MT5MonitoringSettings,
+    TradingSystem,
+    TimeFrame,
+    DataFile
 )
 
 # Register your models here.
@@ -310,7 +313,240 @@ class MT5MonitoringSettingsAdmin(admin.ModelAdmin):
     status_icon.short_description = 'Status'
 
 
+# ============================================================================
+# ТОРГОВЫЕ СИСТЕМЫ
+# ============================================================================
+
+class TimeFrameInline(admin.TabularInline):
+    """Inline для управления таймфреймами в торговой системе"""
+    model = TimeFrame
+    extra = 1
+    fields = ['timeframe', 'level', 'is_active']
+    ordering = ['level']
+
+
+@admin.register(TradingSystem)
+class TradingSystemAdmin(admin.ModelAdmin):
+    """Админ панель для торговых систем"""
+    
+    list_display = [
+        'system_status_icon', 'system_sid', 'name', 'symbol', 
+        'timeframes_count', 'time_offset_minutes', 'is_active', 
+        'files_count', 'created_at'
+    ]
+    
+    list_filter = [
+        'is_active', 'symbol', 'timeframes_count', 'created_at'
+    ]
+    
+    search_fields = [
+        'system_sid', 'name', 'symbol', 'description'
+    ]
+    
+    list_editable = [
+        'is_active'
+    ]
+    
+    readonly_fields = [
+        'created_at', 'updated_at', 'expected_files_info', 'file_pattern_info'
+    ]
+    
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('system_sid', 'name', 'symbol')
+        }),
+        ('Конфигурация', {
+            'fields': ('timeframes_count', 'time_offset_minutes', 'is_active')
+        }),
+        ('Дополнительно', {
+            'fields': ('description',),
+            'classes': ('collapse',)
+        }),
+        ('Системная информация', {
+            'fields': ('expected_files_info', 'file_pattern_info', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    inlines = [TimeFrameInline]
+    
+    def system_status_icon(self, obj):
+        if obj.is_active:
+            return format_html(
+                '<span style="color: green; font-size: 16px;">●</span>'
+            )
+        else:
+            return format_html(
+                '<span style="color: red; font-size: 16px;">●</span>'
+            )
+    
+    system_status_icon.short_description = 'Статус'
+    
+    def files_count(self, obj):
+        count = obj.data_files.count()
+        if count > 0:
+            return format_html(
+                '<a href="{}?trading_system__id__exact={}">{} files</a>',
+                reverse('admin:main_datafile_changelist'),
+                obj.id,
+                count
+            )
+        return '0 files'
+    
+    files_count.short_description = 'Файлы'
+    
+    def expected_files_info(self, obj):
+        return f"Ожидается файлов: {obj.get_expected_files_count()}"
+    
+    expected_files_info.short_description = 'Ожидаемые файлы'
+    
+    def file_pattern_info(self, obj):
+        return format_html('<code>{}</code>', obj.get_file_pattern())
+    
+    file_pattern_info.short_description = 'Паттерн файлов'
+
+
+@admin.register(TimeFrame)
+class TimeFrameAdmin(admin.ModelAdmin):
+    """Админ панель для таймфреймов"""
+    
+    list_display = [
+        'trading_system', 'timeframe', 'level', 'is_active', 
+        'expected_filename', 'files_count'
+    ]
+    
+    list_filter = [
+        'timeframe', 'is_active', 'trading_system'
+    ]
+    
+    search_fields = [
+        'trading_system__system_sid', 'trading_system__name', 'timeframe'
+    ]
+    
+    list_editable = [
+        'level', 'is_active'
+    ]
+    
+    ordering = ['trading_system', 'level']
+    
+    def expected_filename(self, obj):
+        return format_html('<code>{}</code>', obj.get_filename_pattern())
+    
+    expected_filename.short_description = 'Ожидаемый файл'
+    
+    def files_count(self, obj):
+        count = obj.data_files.count()
+        if count > 0:
+            return format_html(
+                '<a href="{}?timeframe__id__exact={}">{}</a>',
+                reverse('admin:main_datafile_changelist'),
+                obj.id,
+                count
+            )
+        return '0'
+    
+    files_count.short_description = 'Файлов'
+
+
+@admin.register(DataFile)
+class DataFileAdmin(admin.ModelAdmin):
+    """Админ панель для файлов данных"""
+    
+    list_display = [
+        'file_status_icon', 'filename', 'trading_system', 'timeframe',
+        'file_size_display', 'rows_processed', 'status', 'file_modified', 'processed_at'
+    ]
+    
+    list_filter = [
+        'status', 'trading_system', 'timeframe', 'created_at', 'processed_at'
+    ]
+    
+    search_fields = [
+        'filename', 'trading_system__system_sid', 'trading_system__name'
+    ]
+    
+    readonly_fields = [
+        'created_at', 'processed_at', 'json_preview'
+    ]
+    
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('trading_system', 'timeframe', 'filename', 'file_path')
+        }),
+        ('Файл', {
+            'fields': ('file_size', 'file_modified', 'status')
+        }),
+        ('Обработка', {
+            'fields': ('rows_processed', 'error_message', 'processed_at')
+        }),
+        ('JSON данные', {
+            'fields': ('json_preview',),
+            'classes': ('collapse',)
+        }),
+        ('Системная информация', {
+            'fields': ('created_at',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = ['reprocess_files', 'mark_as_pending']
+    
+    def file_status_icon(self, obj):
+        status_colors = {
+            'pending': '#ffc107',      # yellow
+            'processing': '#007bff',   # blue
+            'completed': '#28a745',    # green
+            'error': '#dc3545',        # red
+            'skipped': '#6c757d',      # gray
+        }
+        color = status_colors.get(obj.status, '#6c757d')
+        return format_html(
+            '<span style="color: {}; font-size: 16px;">●</span>',
+            color
+        )
+    
+    file_status_icon.short_description = 'Статус'
+    
+    def file_size_display(self, obj):
+        if obj.file_size:
+            if obj.file_size < 1024:
+                return f"{obj.file_size} B"
+            elif obj.file_size < 1024 * 1024:
+                return f"{obj.file_size / 1024:.1f} KB"
+            else:
+                return f"{obj.file_size / (1024 * 1024):.1f} MB"
+        return "-"
+    
+    file_size_display.short_description = 'Размер'
+    
+    def json_preview(self, obj):
+        if obj.json_data:
+            import json
+            try:
+                formatted = json.dumps(obj.json_data, indent=2, ensure_ascii=False)
+                if len(formatted) > 2000:
+                    formatted = formatted[:2000] + "..."
+                return format_html('<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px;">{}</pre>', formatted)
+            except:
+                return "Ошибка форматирования JSON"
+        return "JSON данные отсутствуют"
+    
+    json_preview.short_description = 'Предпросмотр JSON'
+    
+    def reprocess_files(self, request, queryset):
+        updated = queryset.update(status='pending', error_message='', processed_at=None)
+        self.message_user(request, f'{updated} файлов помечены для повторной обработки.')
+    
+    reprocess_files.short_description = "Повторно обработать выбранные файлы"
+    
+    def mark_as_pending(self, request, queryset):
+        updated = queryset.update(status='pending')
+        self.message_user(request, f'{updated} файлов помечены как ожидающие обработки.')
+    
+    mark_as_pending.short_description = "Пометить как ожидающие"
+
+
 # Настройка заголовков админ панели
 admin.site.site_header = "Project GCE 3 - Админ панель"
 admin.site.site_title = "Project GCE 3"
-admin.site.index_title = "Управление MT5 подключениями"
+admin.site.index_title = "Управление MT5 & Торговыми системами"
