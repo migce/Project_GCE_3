@@ -1,7 +1,9 @@
 from django.shortcuts import render
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
-from .models import MT5ConnectionSettings, MT5ConnectionLog, TradingSystem, TimeFrame, DataFile, DataIngestionStatus
+from datetime import timedelta
+from django.db.models import Max
+from .models import MT5ConnectionSettings, MT5ConnectionLog, TradingSystem, TimeFrame, DataFile, DataIngestionStatus, ImportLog, Bar
 from django.conf import settings as django_settings
 from .services.mt5_service import MT5Service
 import sys
@@ -1146,6 +1148,28 @@ def ingestion_status_api(request):
     return JsonResponse({'success': False, 'message': 'Only GET allowed'})
 
 
+def ingestion_logs_api(request):
+    """API endpoint to return last 20 import logs."""
+    if request.method == 'GET':
+        logs = list(
+            ImportLog.objects.select_related('trading_system', 'timeframe')
+            .order_by('-created_at')[:20]
+        )
+        data = []
+        for log in logs:
+            data.append({
+                'created_at': log.created_at.isoformat() if log.created_at else None,
+                'filename': log.filename,
+                'action': log.action,
+                'rows_imported': log.rows_imported,
+                'message': log.message or '',
+                'trading_system': log.trading_system.system_sid if log.trading_system else None,
+                'timeframe': log.timeframe.timeframe if log.timeframe else None,
+            })
+        return JsonResponse({'success': True, 'logs': data})
+    return JsonResponse({'success': False, 'message': 'Only GET allowed'})
+
+
 def start_ingestion_service(request):
     if request.method == 'POST':
         try:
@@ -1158,6 +1182,45 @@ def start_ingestion_service(request):
         except Exception as e:
             return JsonResponse({'success': False, 'message': str(e)})
     return JsonResponse({'success': False, 'message': 'Only POST allowed'})
+
+
+def raw_signals_overview(request):
+    """Raw Signals: compact per-system overview with last bar timestamps per TF."""
+    systems_qs = TradingSystem.objects.all().prefetch_related('timeframes')
+    # Collect timeframe IDs to fetch last bar times in one query
+    all_tf_ids = []
+    for sys in systems_qs:
+        all_tf_ids.extend(tf.id for tf in sys.timeframes.all())
+
+    last_by_tf = {}
+    if all_tf_ids:
+        qs = (Bar.objects
+              .filter(timeframe_id__in=all_tf_ids)
+              .values('timeframe_id')
+              .annotate(last_dt=Max('dt')))
+        last_by_tf = {row['timeframe_id']: row['last_dt'] for row in qs}
+
+    systems = []
+    for sys in systems_qs:
+        tfs = list(sys.timeframes.all())
+        tf_infos = []
+        for tf in tfs:
+            tf_infos.append({
+                'id': tf.id,
+                'timeframe': getattr(tf, 'timeframe', None),
+                'level': getattr(tf, 'level', None),
+                'last_dt': last_by_tf.get(tf.id),
+                'last_server_dt': last_by_tf.get(tf.id),
+            })
+        systems.append({
+            'id': sys.id,
+            'system_sid': sys.system_sid,
+            'symbol': sys.symbol,
+            'timeframes_count': getattr(sys, 'timeframes_count', len(tfs)),
+            'timeframes': tf_infos,
+        })
+
+    return render(request, 'main/raw_signals.html', {'systems': systems})
 
 
 def stop_ingestion_service(request):

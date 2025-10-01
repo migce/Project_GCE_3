@@ -1,4 +1,5 @@
 from django.contrib import admin
+from datetime import timedelta
 from django.utils.html import format_html
 from django.urls import reverse
 from django.utils.safestring import mark_safe
@@ -8,11 +9,14 @@ from .models import (
     MT5ConnectionHealth,
     MT5MonitoringSettings,
     TradingSystem,
+    TradingSystemSignalSettings,
     TimeFrame,
     DataFile,
     IndicatorDefinition,
     Bar,
     IndicatorValue,
+    ImportLog,
+    SignalEvent,
 )
 
 # Register your models here.
@@ -371,8 +375,59 @@ class TradingSystemAdmin(admin.ModelAdmin):
         }),
     )
     
-    inlines = [TimeFrameInline]
-    actions = ['scan_data_files', 'import_pending_files']
+    class SignalSettingsInline(admin.StackedInline):
+        model = TradingSystemSignalSettings
+        extra = 0
+        max_num = 1
+        can_delete = True
+        verbose_name = 'Signal Logic'
+        verbose_name_plural = 'Signal Logic'
+        readonly_fields = ['indicators_available']
+        fields = ('signal_logic', 'signal_base_tf_level', 'signal_indicators', 'indicators_available')
+
+        def get_formset(self, request, obj=None, **kwargs):
+            # Keep a reference to parent TradingSystem for readonly field rendering when obj is not yet saved
+            self._parent_ts = obj
+            return super().get_formset(request, obj, **kwargs)
+
+        def indicators_available(self, obj):
+            from django.utils.html import format_html
+            # Determine trading system
+            ts = None
+            if obj and getattr(obj, 'trading_system_id', None):
+                ts = obj.trading_system
+            elif hasattr(self, '_parent_ts') and self._parent_ts is not None:
+                ts = self._parent_ts
+            if ts is None:
+                return 'Save Trading System first to see indicators.'
+
+            # Collect indicators for this system and distinct TF levels observed in data
+            names = list(IndicatorDefinition.objects.filter(trading_system=ts)
+                        .values_list('name', flat=True).order_by('name').distinct())
+            rows = IndicatorValue.objects.filter(indicator__trading_system=ts)
+            rows = rows.values_list('indicator__name', 'tf_level').distinct()
+            levels_map = {}
+            for name, lvl in rows:
+                if name not in levels_map:
+                    levels_map[name] = set()
+                if lvl is not None:
+                    levels_map[name].add(int(lvl))
+
+            if not names:
+                return 'No indicators detected yet. Import data to populate the list.'
+
+            lines = []
+            for name in names:
+                lvls = sorted(levels_map.get(name, []))
+                lvls_str = ', '.join(f'L{v}' for v in lvls) if lvls else '-'
+                lines.append(f"{name}: {lvls_str}")
+            html = '<pre style="white-space: pre-wrap; background:#f8f9fa; padding:8px; border-radius:4px; max-height:240px; overflow:auto;">' \
+                   + '\n'.join(lines) + '</pre>'
+            return format_html(html)
+        indicators_available.short_description = 'Available Indicators (by TF levels)'
+
+    inlines = [TimeFrameInline, SignalSettingsInline]
+    actions = ['scan_data_files', 'import_pending_files', 'wipe_market_data', 'generate_signals_now']
     
     def system_status_icon(self, obj):
         if obj.is_active:
@@ -476,6 +531,65 @@ class TradingSystemAdmin(admin.ModelAdmin):
         self.message_user(request, f"Imported pending files → OK: {ok}, Failed: {failed}")
     import_pending_files.short_description = 'Импортировать все pending файлы системы'
 
+    def wipe_market_data(self, request, queryset):
+        from django.db import transaction
+        from .models import DataIngestionStatus
+        with transaction.atomic():
+            iv_cnt = IndicatorValue.objects.count()
+            IndicatorValue.objects.all().delete()
+            bar_cnt = Bar.objects.count()
+            Bar.objects.all().delete()
+            log_cnt = ImportLog.objects.count()
+            ImportLog.objects.all().delete()
+            df_qs = DataFile.objects.all()
+            df_cnt = df_qs.count()
+            df_qs.update(status='pending', rows_processed=None, processed_at=None, error_message='')
+            st = DataIngestionStatus.get()
+            st.files_scanned = 0
+            st.files_imported = 0
+            st.rows_imported = 0
+            st.last_run = None
+            st.last_error = ''
+            st.save()
+        self.message_user(request, f"Wiped market data. Bars={bar_cnt}, IndicatorValues={iv_cnt}, Logs={log_cnt}, Files reset={df_cnt}")
+    wipe_market_data.short_description = 'Очистить рыночные данные (Bars/Indicators/Logs)'
+
+    def generate_signals_now(self, request, queryset):
+        """Manually run signal generation for selected systems and save events."""
+        from django.db import transaction
+        from .services.signal_engine import generate_signals_for_system
+
+        total_saved = 0
+        details = []
+        for system in queryset:
+            try:
+                events = generate_signals_for_system(system, limit_bars=1000)
+                if not events:
+                    details.append(f"{system.system_sid}: no signals")
+                    continue
+                saved = 0
+                with transaction.atomic():
+                    for ev in events:
+                        obj, created = SignalEvent.objects.get_or_create(
+                            trading_system=ev.trading_system,
+                            timeframe=ev.timeframe,
+                            event_time=ev.event_time,
+                            direction=ev.direction,
+                            defaults={'rule_text': ev.rule_text, 'bar': ev.bar},
+                        )
+                        if not created and obj.bar_id is None and ev.bar_id:
+                            obj.bar = ev.bar
+                            obj.save(update_fields=['bar'])
+                        if created:
+                            saved += 1
+                total_saved += saved
+                details.append(f"{system.system_sid}: saved {saved}")
+            except Exception as e:
+                details.append(f"{system.system_sid}: ERROR {e}")
+        msg = f"Signals generated. New events: {total_saved}. " + (" | ".join(details[:4]) + (" …" if len(details) > 4 else ""))
+        self.message_user(request, msg)
+    generate_signals_now.short_description = 'Сгенерировать сигналы сейчас'
+
 
 @admin.register(TimeFrame)
 class TimeFrameAdmin(admin.ModelAdmin):
@@ -536,7 +650,7 @@ class TimeFrameAdmin(admin.ModelAdmin):
 
 @admin.register(Bar)
 class BarAdmin(admin.ModelAdmin):
-    list_display = ['dt', 'timeframe', 'trading_system', 'open', 'high', 'low', 'close', 'volume', 'data_file']
+    list_display = ['dt', 'bartime', 'timeframe', 'trading_system', 'open', 'high', 'low', 'close', 'volume', 'data_file']
     list_filter = ['timeframe', 'trading_system']
     search_fields = ['symbol']
     date_hierarchy = 'dt'
@@ -550,6 +664,16 @@ class BarAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+    def bartime(self, obj):
+        # Show bar time exactly as in source (stored in dt_server during import). No fallbacks.
+        if getattr(obj, 'dt_server', None):
+            try:
+                return obj.dt_server.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                return str(obj.dt_server)
+        return '-'
+    bartime.short_description = 'BAR TIME'
 
 
 @admin.register(IndicatorDefinition)
@@ -574,6 +698,14 @@ class IndicatorValueAdmin(admin.ModelAdmin):
     def has_change_permission(self, request, obj=None):
         return False
 
+
+@admin.register(SignalEvent)
+class SignalEventAdmin(admin.ModelAdmin):
+    list_display = ['event_time', 'direction', 'trading_system', 'timeframe', 'bar']
+    list_filter = ['trading_system', 'timeframe', 'direction']
+    search_fields = ['trading_system__system_sid']
+    date_hierarchy = 'event_time'
+    ordering = ['-event_time']
 
 @admin.register(DataFile)
 class DataFileAdmin(admin.ModelAdmin):

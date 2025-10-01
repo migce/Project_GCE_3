@@ -35,7 +35,7 @@ KNOWN_BASE_COLUMNS = {
 }
 
 
-def _parse_datetime(date_str: str, time_str: str, tz_offset_min: int) -> datetime:
+def _parse_local_datetime(date_str: str, time_str: str) -> datetime:
     date_str = (date_str or '').strip()
     time_str = (time_str or '').strip()
     if not date_str or not time_str:
@@ -71,10 +71,9 @@ def _parse_datetime(date_str: str, time_str: str, tz_offset_min: int) -> datetim
         hhmm = datetime.strptime(time_str, '%H:%M')
         hh, mm = hhmm.hour, hhmm.minute
 
+    # Local/server datetime as provided in CSV (no offset adjustment here)
     local_dt = dt_date.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    # Convert to UTC by subtracting export offset
-    utc_dt = local_dt - timedelta(minutes=int(tz_offset_min or 0))
-    return utc_dt.replace(tzinfo=dt_timezone.utc)
+    return local_dt
 
 
 def _to_decimal(value: str | None) -> Decimal | None:
@@ -154,16 +153,19 @@ def import_datafile(data_file: DataFile) -> ImportResult:
 
         result = ImportResult()
 
-        with transaction.atomic():
-            # Remove previous bars produced from this file
+        # Remove previous bars produced from this file in a short transaction
+        try:
+            with transaction.atomic():
+                Bar.objects.filter(data_file=data_file).delete()
+        except Exception:
             Bar.objects.filter(data_file=data_file).delete()
 
-            bar_buffer: List[Bar] = []
-            rows_buffer: List[Dict[str, str]] = []
-            iv_buffer: List[IndicatorValue] = []
-            batch_size = 2000
+        bar_buffer: List[Bar] = []
+        rows_buffer: List[Dict[str, str]] = []
+        iv_buffer: List[IndicatorValue] = []
+        batch_size = 2000
 
-            for i, row in enumerate(reader, start=2):
+        for i, row in enumerate(reader, start=2):
                 # Parse base fields (case-insensitive keys)
                 def g(key: str) -> str | None:
                     for k in (key, key.upper(), key.capitalize()):
@@ -173,13 +175,29 @@ def import_datafile(data_file: DataFile) -> ImportResult:
                     return row.get(key) or row.get(key.lower())
 
                 try:
-                    dt_utc = _parse_datetime(
-                        g('bar_date') or '',
-                        g('bar_time_hhmm') or '',
-                        int((g('tz_offset_min') or '0') or 0)
-                    )
+                    # Validate presence of mandatory fields
+                    bar_date = (g('bar_date') or '').strip()
+                    bar_time = (g('bar_time_hhmm') or '').strip()
+                    if not bar_date or not bar_time:
+                        result.rows_skipped += 1
+                        continue
+
+                    # Parse local/server datetime first (CSV already aligned to MT server time)
+                    local_dt = _parse_local_datetime(bar_date, bar_time)
+                    # Take time as-is from CSV (no auto UTC shifting); store aware-as-UTC to keep Django happy
+                    dt_val = timezone.make_aware(local_dt, dt_timezone.utc)
                 except Exception:
                     result.parse_errors += 1
+                    result.rows_skipped += 1
+                    continue
+
+                # Parse OHLC and ensure they are all present (skip incomplete rows)
+                o = _to_decimal(g('o'))
+                h = _to_decimal(g('h'))
+                l = _to_decimal(g('l'))
+                c = _to_decimal(g('c'))
+                if o is None or h is None or l is None or c is None:
+                    # Incomplete bar row; likely partially written or malformed line
                     result.rows_skipped += 1
                     continue
 
@@ -187,11 +205,12 @@ def import_datafile(data_file: DataFile) -> ImportResult:
                     trading_system=system,
                     timeframe=timeframe,
                     data_file=data_file,
-                    dt=dt_utc,
-                    open=_to_decimal(g('o')),
-                    high=_to_decimal(g('h')),
-                    low=_to_decimal(g('l')),
-                    close=_to_decimal(g('c')),
+                    dt=dt_val,
+                    dt_server=dt_val,
+                    open=o,
+                    high=h,
+                    low=l,
+                    close=c,
                     volume=None,
                     symbol=g('symbol') or system.symbol,
                     source_row=i,
@@ -201,57 +220,61 @@ def import_datafile(data_file: DataFile) -> ImportResult:
                 result.rows_read += 1
 
                 if len(bar_buffer) >= batch_size:
-                    Bar.objects.bulk_create(bar_buffer, batch_size=batch_size)
-                    result.bars_created += len(bar_buffer)
-                    # Query back bars to ensure PKs across backends
-                    dts = [b.dt for b in bar_buffer]
-                    bar_map = {b.dt: b for b in Bar.objects.filter(timeframe=timeframe, dt__in=dts)}
-                    for row_buf in rows_buffer:
-                        try:
-                            dt_utc = _parse_datetime(
-                                (row_buf.get('bar_date') or row_buf.get('BAR_DATE') or ''),
-                                (row_buf.get('bar_time_hhmm') or row_buf.get('BAR_TIME_HHMM') or ''),
-                                int((row_buf.get('tz_offset_min') or row_buf.get('TZ_OFFSET_MIN') or '0') or 0)
-                            )
-                        except Exception:
-                            continue
-                        bar = bar_map.get(dt_utc)
-                        if not bar:
-                            continue
-                        for col in indicator_cols:
-                            val = row_buf.get(col)
-                            ival = _to_int(val)
-                            if ival is None:
+                    # Commit batch in its own short transaction to avoid long DB locks
+                    with transaction.atomic():
+                        Bar.objects.bulk_create(bar_buffer, batch_size=batch_size)
+                        result.bars_created += len(bar_buffer)
+                        # Query back bars to ensure PKs across backends
+                        dts = [b.dt for b in bar_buffer]
+                        bar_map = {b.dt: b for b in Bar.objects.filter(timeframe=timeframe, dt__in=dts)}
+                        for row_buf in rows_buffer:
+                            try:
+                                local_dt = _parse_local_datetime(
+                                    (row_buf.get('bar_date') or row_buf.get('BAR_DATE') or ''),
+                                    (row_buf.get('bar_time_hhmm') or row_buf.get('BAR_TIME_HHMM') or '')
+                                )
+                                dt_val = timezone.make_aware(local_dt, dt_timezone.utc)
+                            except Exception:
                                 continue
-                            ind = existing_defs[col]
-                            iv_buffer.append(IndicatorValue(
-                                bar=bar,
-                                indicator=ind,
-                                value_int=ival,
-                                tf_level=int((row_buf.get('TF_Level') or row_buf.get('tf_level') or row_buf.get('TF_LEVEL') or timeframe.level or 0))
-                            ))
+                            bar = bar_map.get(dt_val)
+                            if not bar:
+                                continue
+                            for col in indicator_cols:
+                                val = row_buf.get(col)
+                                ival = _to_int(val)
+                                if ival is None:
+                                    continue
+                                ind = existing_defs[col]
+                                iv_buffer.append(IndicatorValue(
+                                    bar=bar,
+                                    indicator=ind,
+                                    value_int=ival,
+                                    tf_level=int((row_buf.get('TF_Level') or row_buf.get('tf_level') or row_buf.get('TF_LEVEL') or timeframe.level or 0))
+                                ))
                     if iv_buffer:
                         IndicatorValue.objects.bulk_create(iv_buffer, batch_size=batch_size)
                         result.indicator_values_created += len(iv_buffer)
                         iv_buffer.clear()
+                    # clear buffers only when we actually flushed a full batch
                     bar_buffer.clear()
                     rows_buffer.clear()
 
-            if bar_buffer:
+        if bar_buffer:
+            with transaction.atomic():
                 Bar.objects.bulk_create(bar_buffer, batch_size=batch_size)
                 result.bars_created += len(bar_buffer)
                 dts = [b.dt for b in bar_buffer]
                 bar_map = {b.dt: b for b in Bar.objects.filter(timeframe=timeframe, dt__in=dts)}
                 for row_buf in rows_buffer:
                     try:
-                        dt_utc = _parse_datetime(
+                        local_dt = _parse_local_datetime(
                             (row_buf.get('bar_date') or row_buf.get('BAR_DATE') or ''),
-                            (row_buf.get('bar_time_hhmm') or row_buf.get('BAR_TIME_HHMM') or ''),
-                            int((row_buf.get('tz_offset_min') or row_buf.get('TZ_OFFSET_MIN') or '0') or 0)
+                            (row_buf.get('bar_time_hhmm') or row_buf.get('BAR_TIME_HHMM') or '')
                         )
+                        dt_val = timezone.make_aware(local_dt, dt_timezone.utc)
                     except Exception:
                         continue
-                    bar = bar_map.get(dt_utc)
+                    bar = bar_map.get(dt_val)
                     if not bar:
                         continue
                     for col in indicator_cols:
@@ -270,13 +293,15 @@ def import_datafile(data_file: DataFile) -> ImportResult:
                     IndicatorValue.objects.bulk_create(iv_buffer, batch_size=batch_size)
                     result.indicator_values_created += len(iv_buffer)
 
-        # finalize DataFile status
-        data_file.status = 'completed'
-        data_file.rows_processed = result.rows_read
-        data_file.processed_at = timezone.now()
-        data_file.save(update_fields=['status', 'rows_processed', 'processed_at'])
+        # finalize DataFile status in its own short transaction
+        with transaction.atomic():
+            data_file.status = 'completed'
+            data_file.rows_processed = result.rows_read
+            data_file.processed_at = timezone.now()
+            data_file.save(update_fields=['status', 'rows_processed', 'processed_at'])
 
     return result
+
 
 
 

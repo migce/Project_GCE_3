@@ -7,7 +7,7 @@ urlpatterns = [
     path('', views.home, name='home'),
     path('trading-history/', views.trading_history, name='trading_history'),
     path('system-dashboard/', views.system_dashboard, name='system_dashboard'),
-    path('raw-signals/', views.raw_signals, name='raw_signals'),
+    path('raw-signals/', views.raw_signals_overview, name='raw_signals'),
     path('api/mt5/connect/', views.connect_mt5, name='mt5_connect'),
     path('api/mt5/disconnect/', views.disconnect_mt5, name='mt5_disconnect'),
     path('api/mt5/status/', views.mt5_status_api, name='mt5_status_api'),
@@ -19,6 +19,7 @@ urlpatterns = [
     
     # Data ingestion API
     path('api/ingestion/status/', views.ingestion_status_api, name='ingestion_status'),
+    path('api/ingestion/logs/', views.ingestion_logs_api, name='ingestion_logs'),
     path('api/ingestion/start/', views.start_ingestion_service, name='start_ingestion'),
     path('api/ingestion/stop/', views.stop_ingestion_service, name='stop_ingestion'),
     # Trading Systems API

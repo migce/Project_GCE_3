@@ -454,6 +454,40 @@ class TradingSystem(models.Model):
         from django.conf import settings as django_settings
         return self.data_dir or getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
 
+class TradingSystemSignalSettings(models.Model):
+    """Per-system signal logic configuration."""
+
+    trading_system = models.OneToOneField(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='signal_settings',
+        verbose_name='Trading System'
+    )
+    signal_logic = models.TextField(
+        blank=True,
+        verbose_name='Signal Logic (IF/THEN/ELSE)',
+        help_text='Rules DSL, e.g., IF cond THEN BUY ELSE NONE'
+    )
+    signal_base_tf_level = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Base TF Level',
+        help_text='TF level to evaluate rules on (1=M1, 2=M2, ...). Optional.'
+    )
+    signal_indicators = models.TextField(
+        blank=True,
+        verbose_name='Indicators Description',
+        help_text='List/mapping of indicator names and their TFs available in rules'
+    )
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated')
+
+    class Meta:
+        verbose_name = 'Signal Settings'
+        verbose_name_plural = 'Signal Settings'
+
+    def __str__(self):
+        return f"Signal Settings for {self.trading_system.system_sid}"
+
 class TimeFrame(models.Model):
     """Модель для описания таймфреймов торговой системы"""
     
@@ -669,6 +703,7 @@ class Bar(models.Model):
     )
 
     dt = models.DateTimeField(verbose_name='Datetime (UTC)', db_index=True)
+    dt_server = models.DateTimeField(null=True, blank=True, verbose_name='Bar Time (source)')
     open = models.DecimalField(max_digits=20, decimal_places=10, null=True)
     high = models.DecimalField(max_digits=20, decimal_places=10, null=True)
     low = models.DecimalField(max_digits=20, decimal_places=10, null=True)
@@ -716,6 +751,31 @@ class IndicatorValue(models.Model):
         verbose_name = 'Indicator Value'
         verbose_name_plural = 'Indicator Values'
 
+
+class SignalEvent(models.Model):
+    DIRECTION_CHOICES = [
+        ('BUY', 'BUY'),
+        ('SELL', 'SELL'),
+    ]
+
+    trading_system = models.ForeignKey(TradingSystem, on_delete=models.CASCADE, related_name='signals', verbose_name='Trading System')
+    timeframe = models.ForeignKey(TimeFrame, on_delete=models.CASCADE, related_name='signals', verbose_name='Timeframe')
+    bar = models.ForeignKey(Bar, on_delete=models.SET_NULL, null=True, blank=True, related_name='signals', verbose_name='Bar')
+    direction = models.CharField(max_length=8, choices=DIRECTION_CHOICES)
+    rule_text = models.TextField(blank=True)
+    event_time = models.DateTimeField(verbose_name='Event Time')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-event_time']
+        indexes = [
+            models.Index(fields=['trading_system', 'timeframe', '-event_time']),
+            models.Index(fields=['bar', 'direction']),
+        ]
+        unique_together = [('trading_system', 'timeframe', 'event_time', 'direction')]
+
+    def __str__(self):
+        return f"{self.trading_system.system_sid}:{self.timeframe.timeframe} {self.direction} @ {self.event_time:%Y-%m-%d %H:%M:%S}"
 
 class DataIngestionStatus(models.Model):
     """Singleton-like model to track data ingestion worker status and KPIs."""

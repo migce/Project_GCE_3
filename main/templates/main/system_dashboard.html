@@ -90,6 +90,7 @@
             <button id="startIngestionBtn" class="btn btn-success" onclick="startIngestion()">Start</button>
             <button id="stopIngestionBtn" class="btn btn-danger" onclick="stopIngestion()">Stop</button>
             <button class="btn btn-secondary" onclick="refreshIngestionStatus()">Refresh</button>
+            <button class="btn btn-secondary" onclick="openIngestionLogs()">Logs</button>
         </div>
         <div style="clear: both;"></div>
     </div>
@@ -115,6 +116,14 @@
                 <div id="ingestionRowsImported" class="metric-value">0</div>
                 <div class="metric-label">Rows Imported</div>
             </div>
+            <div class="metric-card">
+                <div id="ingestionHeartbeat" class="metric-value">-</div>
+                <div class="metric-label">Heartbeat</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionHeartbeat" class="metric-value">-</div>
+                <div class="metric-label">Heartbeat</div>
+            </div>
         </div>
         <div class="alert alert-warning" id="ingestionLastError" style="display:none; margin-top: 1rem;"></div>
     </div>
@@ -131,6 +140,21 @@
         setText('ingestionFilesImported', (d.files_imported!=null?d.files_imported:0));
         setText('ingestionRowsImported', (d.rows_imported!=null?d.rows_imported:0));
         var e=document.getElementById('ingestionLastError'); if(e){ if(d.last_error){e.style.display='block'; e.textContent='Last error: '+d.last_error;} else {e.style.display='none'; e.textContent='';}}
+        // Heartbeat: stale if last_run older than 2x scan_interval
+        try {
+          var hb = document.getElementById('ingestionHeartbeat');
+          if (hb) {
+            var ok = false;
+            if (d.last_run) {
+              var last = Date.parse(d.last_run);
+              var now = Date.now();
+              var intervalMs = (d.scan_interval || 5) * 1000;
+              ok = (now - last) <= (2 * intervalMs);
+            }
+            hb.textContent = ok ? 'OK' : 'STALE';
+            hb.style.color = ok ? '#28a745' : '#dc3545';
+          }
+        } catch (err) { /* noop */ }
       });
   };
   window.startIngestion=function(){
@@ -139,9 +163,65 @@
   window.stopIngestion=function(){
     fetch('/api/ingestion/stop/',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest','X-CSRFToken':getCookie('csrftoken')}}).then(window.refreshIngestionStatus);
   };
+  window.openIngestionLogs=function(){
+    var m=document.getElementById('ingestionLogsModal'); if(m){m.style.display='block'; window.fetchIngestionLogs();}
+  };
+  window.closeIngestionLogs=function(){
+    var m=document.getElementById('ingestionLogsModal'); if(m){m.style.display='none';}
+  };
+  window.fetchIngestionLogs=function(){
+    var tbody=document.getElementById('ingestionLogsBody'); if(!tbody)return; tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#6c757d;">Loading...</td></tr>';
+    fetch('/api/ingestion/logs/',{credentials:'same-origin'})
+      .then(function(r){return r.json();})
+      .then(function(res){
+        if(!res||!res.success){tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#dc3545;">Failed to load logs</td></tr>'; return;}
+        var rows=res.logs||[]; if(rows.length===0){tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#6c757d;">No logs</td></tr>'; return;}
+        var html = rows.map(function(l){
+          var dt = l.created_at ? new Date(l.created_at).toLocaleString() : '-';
+          var msg = (l.message||'').replace(/</g,'&lt;');
+          return '<tr>'+
+                 '<td>'+dt+'</td>'+
+                 '<td title="'+l.filename+'">'+l.filename+'</td>'+
+                 '<td>'+l.action+'</td>'+
+                 '<td>'+(l.rows_imported!=null?l.rows_imported:0)+'</td>'+
+                 '<td>'+msg+'</td>'+
+                 '</tr>';
+        }).join('');
+        tbody.innerHTML = html;
+      })
+      .catch(function(){ tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#dc3545;">Failed to load logs</td></tr>'; });
+  };
   document.addEventListener('DOMContentLoaded',function(){window.refreshIngestionStatus(); setInterval(window.refreshIngestionStatus,5000);});
 })();
 </script>
+    <!-- Ingestion Logs Modal -->
+    <div id="ingestionLogsModal" style="display:none; position: fixed; left:0; right:0; top:0; bottom:0; background: rgba(0,0,0,0.5); z-index: 2000;">
+        <div style="background:#fff; width:min(900px,95vw); margin:5vh auto; border-radius:8px; overflow:hidden;">
+            <div style="padding:1rem 1.5rem; border-bottom:1px solid #eee; display:flex; align-items:center; justify-content:space-between;">
+                <h4 style="margin:0;">Ingestion Logs (last 20)</h4>
+                <div>
+                    <button class="btn btn-secondary" onclick="fetchIngestionLogs()">Refresh</button>
+                    <button class="btn btn-danger" onclick="closeIngestionLogs()">Close</button>
+                </div>
+            </div>
+            <div style="padding:1rem 1.5rem; max-height:70vh; overflow:auto;">
+                <table class="table" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="width:22%;">Time</th>
+                            <th style="width:34%;">File</th>
+                            <th style="width:12%;">Action</th>
+                            <th style="width:12%;">Rows</th>
+                            <th style="width:20%;">Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ingestionLogsBody">
+                        <tr><td colspan="5" style="text-align:center; color:#6c757d;">No data</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
 
 <div class="card">
     <div class="card-header">
@@ -785,6 +865,7 @@ function stopMonitoring() {
             <button id="startIngestionBtn" class="btn btn-success" onclick="startIngestion()">Start</button>
             <button id="stopIngestionBtn" class="btn btn-danger" onclick="stopIngestion()">Stop</button>
             <button class="btn btn-secondary" onclick="refreshIngestionStatus()">Refresh</button>
+            <button class="btn btn-secondary" onclick="openIngestionLogs()">Logs</button>
         </div>
         <div style="clear: both;"></div>
     </div>
@@ -832,6 +913,16 @@ function stopMonitoring() {
                         errBox.style.display = 'none';
                         errBox.textContent = '';
                     }
+                    try {
+                        const hb = document.getElementById('ingestionHeartbeat');
+                        if (hb) {
+                            const intervalMs = (data.scan_interval || 5) * 1000;
+                            const last = data.last_run ? Date.parse(data.last_run) : 0;
+                            const ok = last && (Date.now() - last) <= (2 * intervalMs);
+                            hb.textContent = ok ? 'OK' : 'STALE';
+                            hb.style.color = ok ? '#28a745' : '#dc3545';
+                        }
+                    } catch (e) {}
                 })
                 .catch(() => {});
         }
