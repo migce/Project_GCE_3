@@ -16,10 +16,10 @@ class MT5ConnectionSettings(models.Model):
     
     # Настройки терминала
     terminal_path = models.CharField(
-        max_length=500,
+        # max_length=500,
         verbose_name="Путь к терминалу MT5",
         help_text="Полный путь к исполняемому файлу terminal64.exe",
-        blank=True,
+        # blank=True,
         null=True
     )
     
@@ -115,7 +115,8 @@ class MT5ConnectionSettings(models.Model):
         verbose_name="Последнее подключение",
         help_text="Время последнего успешного подключения"
     )
-
+    
+    # Параметр data_dir удалён из MT5ConnectionSettings — директория выбирается на уровне TradingSystem
     class Meta:
         verbose_name = "Настройки MT5"
         verbose_name_plural = "Настройки MT5"
@@ -441,6 +442,17 @@ class TradingSystem(models.Model):
         """Возвращает паттерн имён файлов для системы"""
         return f"collector_{self.system_sid}_{self.symbol}_*.csv"
 
+    # Полный путь к папке с CSV для этой системы
+    data_dir = models.CharField(
+        max_length=500,
+        blank=True,
+        verbose_name="Папка с данными",
+        help_text="Полный путь к папке, где искать файлы системы. Если пусто, используется глобальная TS_EXPORTS_DIR."
+    )
+
+    def get_data_dir(self):
+        from django.conf import settings as django_settings
+        return self.data_dir or getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
 
 class TimeFrame(models.Model):
     """Модель для описания таймфреймов торговой системы"""
@@ -599,3 +611,161 @@ class DataFile(models.Model):
     
     def __str__(self):
         return f"{self.trading_system.system_sid} - {self.filename} ({self.status})"
+
+
+class IndicatorDefinition(models.Model):
+    """Indicator dictionary for a trading system (e.g., DOTS_BIN)."""
+
+    DTYPE_CHOICES = [
+        ('numeric', 'Numeric'),
+        ('boolean', 'Boolean'),
+        ('string', 'String'),
+    ]
+
+    trading_system = models.ForeignKey(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='indicators',
+        verbose_name='Trading System'
+    )
+    name = models.CharField(max_length=64, verbose_name='Name')
+    dtype = models.CharField(max_length=16, choices=DTYPE_CHOICES, default='numeric')
+    description = models.TextField(blank=True)
+
+    class Meta:
+        unique_together = [('trading_system', 'name')]
+        verbose_name = 'Indicator'
+        verbose_name_plural = 'Indicators'
+        indexes = [
+            models.Index(fields=['trading_system', 'name']),
+        ]
+
+    def __str__(self):
+        return f"{self.trading_system.system_sid}:{self.name}"
+
+
+class Bar(models.Model):
+    """OHLCV bar for a particular timeframe and system."""
+
+    trading_system = models.ForeignKey(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='bars',
+        verbose_name='Trading System'
+    )
+    timeframe = models.ForeignKey(
+        TimeFrame,
+        on_delete=models.CASCADE,
+        related_name='bars',
+        verbose_name='Timeframe'
+    )
+    data_file = models.ForeignKey(
+        DataFile,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bars',
+        verbose_name='Source File'
+    )
+
+    dt = models.DateTimeField(verbose_name='Datetime (UTC)', db_index=True)
+    open = models.DecimalField(max_digits=20, decimal_places=10, null=True)
+    high = models.DecimalField(max_digits=20, decimal_places=10, null=True)
+    low = models.DecimalField(max_digits=20, decimal_places=10, null=True)
+    close = models.DecimalField(max_digits=20, decimal_places=10, null=True)
+    volume = models.BigIntegerField(null=True, blank=True)
+    symbol = models.CharField(max_length=20, blank=True)
+    source_row = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        unique_together = [('timeframe', 'dt')]
+        ordering = ['-dt']
+        indexes = [
+            models.Index(fields=['timeframe', '-dt']),
+            models.Index(fields=['trading_system', '-dt']),
+        ]
+
+    def __str__(self):
+        return f"{self.trading_system.system_sid}:{self.timeframe.timeframe}@{self.dt:%Y-%m-%d %H:%M}"
+
+
+class IndicatorValue(models.Model):
+    """Indicator value attached to a bar (integer-only)."""
+
+    bar = models.ForeignKey(
+        Bar,
+        on_delete=models.CASCADE,
+        related_name='indicator_values',
+        verbose_name='Bar'
+    )
+    indicator = models.ForeignKey(
+        IndicatorDefinition,
+        on_delete=models.CASCADE,
+        related_name='values',
+        verbose_name='Indicator'
+    )
+    value_int = models.IntegerField(null=True)
+    tf_level = models.PositiveIntegerField(null=True, blank=True, verbose_name='TF Level', help_text='TF level index from CSV')
+
+    class Meta:
+        unique_together = [('bar', 'indicator')]
+        indexes = [
+            models.Index(fields=['indicator', 'bar']),
+            models.Index(fields=['indicator', 'tf_level']),
+        ]
+        verbose_name = 'Indicator Value'
+        verbose_name_plural = 'Indicator Values'
+
+
+class DataIngestionStatus(models.Model):
+    """Singleton-like model to track data ingestion worker status and KPIs."""
+
+    active = models.BooleanField(default=False)
+    scan_interval = models.PositiveIntegerField(default=5, help_text='Scan interval in seconds')
+    last_run = models.DateTimeField(null=True, blank=True)
+    files_scanned = models.PositiveIntegerField(default=0)
+    files_imported = models.PositiveIntegerField(default=0)
+    rows_imported = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Data Ingestion Status'
+        verbose_name_plural = 'Data Ingestion Status'
+
+    def __str__(self):
+        return f"Ingestion: {'ON' if self.active else 'OFF'} (interval {self.scan_interval}s)"
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+class ImportLog(models.Model):
+    ACTION_CHOICES = [
+        ('imported', 'Imported'),
+        ('no_change', 'No Change'),
+        ('error', 'Error'),
+    ]
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    trading_system = models.ForeignKey(TradingSystem, on_delete=models.SET_NULL, null=True, blank=True)
+    timeframe = models.ForeignKey(TimeFrame, on_delete=models.SET_NULL, null=True, blank=True)
+    data_file = models.ForeignKey(DataFile, on_delete=models.SET_NULL, null=True, blank=True)
+    filename = models.CharField(max_length=255)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    rows_imported = models.IntegerField(default=0)
+    message = models.TextField(blank=True)
+    file_size = models.PositiveIntegerField(null=True, blank=True)
+    file_modified = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['action', '-created_at']),
+        ]
+
+    def __str__(self):
+        ts = self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else '-'
+        return f"{ts} {self.action} {self.filename} (+{self.rows_imported})"

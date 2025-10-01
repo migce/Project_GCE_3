@@ -195,7 +195,6 @@ class MT5ConnectionMonitor:
                 from ..models import MT5ConnectionLog
                 MT5ConnectionLog.objects.create(
                     settings=connection,
-                    connection_type='reconnect',
                     success=True,
                     account_info=account_info
                 )

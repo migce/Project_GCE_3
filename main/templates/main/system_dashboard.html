@@ -82,6 +82,67 @@
     </div>
 </div>
 
+<!-- Data Ingestion Service Card -->
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">📥 Data Ingestion Service</h3>
+        <div style="float: right;">
+            <button id="startIngestionBtn" class="btn btn-success" onclick="startIngestion()">Start</button>
+            <button id="stopIngestionBtn" class="btn btn-danger" onclick="stopIngestion()">Stop</button>
+            <button class="btn btn-secondary" onclick="refreshIngestionStatus()">Refresh</button>
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    <div style="padding: 1.5rem;">
+        <div class="dashboard-grid">
+            <div class="metric-card">
+                <div id="ingestionActive" class="metric-value" style="color:#6c757d">-</div>
+                <div class="metric-label">Active</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionLastRun" class="metric-value">-</div>
+                <div class="metric-label">Last Run</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionFilesScanned" class="metric-value">0</div>
+                <div class="metric-label">Files Scanned</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionFilesImported" class="metric-value">0</div>
+                <div class="metric-label">Files Imported</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionRowsImported" class="metric-value">0</div>
+                <div class="metric-label">Rows Imported</div>
+            </div>
+        </div>
+        <div class="alert alert-warning" id="ingestionLastError" style="display:none; margin-top: 1rem;"></div>
+    </div>
+    <script>
+(function(){
+  function getCookie(name){var v=null;if(document.cookie&&document.cookie!==''){var cs=document.cookie.split(';');for(var i=0;i<cs.length;i++){var c=cs[i].trim();if(c.substring(0,name.length+1)===(name+'=')){v=decodeURIComponent(c.substring(name.length+1));break;}}}return v;}
+  function setText(id,val){var el=document.getElementById(id); if(el){el.textContent=val;}}
+  window.refreshIngestionStatus=function(){
+    fetch('/api/ingestion/status/',{credentials:'same-origin'})
+      .then(function(r){return r.json();})
+      .then(function(d){ if(!d||!d.success)return; var a=document.getElementById('ingestionActive'); if(a){a.textContent=d.active?'ON':'OFF'; a.style.color=d.active?'#28a745':'#dc3545';}
+        setText('ingestionLastRun', d.last_run? new Date(d.last_run).toLocaleString() : '-');
+        setText('ingestionFilesScanned', (d.files_scanned!=null?d.files_scanned:0));
+        setText('ingestionFilesImported', (d.files_imported!=null?d.files_imported:0));
+        setText('ingestionRowsImported', (d.rows_imported!=null?d.rows_imported:0));
+        var e=document.getElementById('ingestionLastError'); if(e){ if(d.last_error){e.style.display='block'; e.textContent='Last error: '+d.last_error;} else {e.style.display='none'; e.textContent='';}}
+      });
+  };
+  window.startIngestion=function(){
+    fetch('/api/ingestion/start/',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest','X-CSRFToken':getCookie('csrftoken')}}).then(window.refreshIngestionStatus);
+  };
+  window.stopIngestion=function(){
+    fetch('/api/ingestion/stop/',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest','X-CSRFToken':getCookie('csrftoken')}}).then(window.refreshIngestionStatus);
+  };
+  document.addEventListener('DOMContentLoaded',function(){window.refreshIngestionStatus(); setInterval(window.refreshIngestionStatus,5000);});
+})();
+</script>
+
 <div class="card">
     <div class="card-header">
         <h3 class="card-title">🔌 MetaTrader5 Connections</h3>
@@ -717,3 +778,78 @@ function stopMonitoring() {
 }
 </script>
 {% endblock %}
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">📥 Data Ingestion Service</h3>
+        <div style="float: right;">
+            <button id="startIngestionBtn" class="btn btn-success" onclick="startIngestion()">Start</button>
+            <button id="stopIngestionBtn" class="btn btn-danger" onclick="stopIngestion()">Stop</button>
+            <button class="btn btn-secondary" onclick="refreshIngestionStatus()">Refresh</button>
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    <div style="padding: 1.5rem;">
+        <div class="dashboard-grid">
+            <div class="metric-card">
+                <div id="ingestionActive" class="metric-value">-</div>
+                <div class="metric-label">Active</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionLastRun" class="metric-value">-</div>
+                <div class="metric-label">Last Run</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionFilesScanned" class="metric-value">0</div>
+                <div class="metric-label">Files Scanned</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionFilesImported" class="metric-value">0</div>
+                <div class="metric-label">Files Imported</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionRowsImported" class="metric-value">0</div>
+                <div class="metric-label">Rows Imported</div>
+            </div>
+        </div>
+        <div class="alert alert-warning" id="ingestionLastError" style="display:none; margin-top: 1rem;"></div>
+    </div>
+    <script>\n        // CSRF helper for Django\n        function getCookie(name) {\n            let cookieValue = null;\n            if (document.cookie && document.cookie !== '') {\n                const cookies = document.cookie.split(';');\n                for (let i = 0; i < cookies.length; i++) {\n                    const cookie = cookies[i].trim();\n                    if (cookie.substring(0, name.length + 1) === (name + '=')) {\n                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));\n                        break;\n                    }\n                }\n            }\n            return cookieValue;\n        }\n        function refreshIngestionStatus() {
+            fetch('/api/ingestion/status/')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) return;
+                    document.getElementById('ingestionActive').textContent = data.active ? 'ON' : 'OFF';
+                    document.getElementById('ingestionActive').style.color = data.active ? '#28a745' : '#dc3545';
+                    document.getElementById('ingestionLastRun').textContent = data.last_run ? new Date(data.last_run).toLocaleString() : '-';
+                    document.getElementById('ingestionFilesScanned').textContent = data.files_scanned ?? 0;
+                    document.getElementById('ingestionFilesImported').textContent = data.files_imported ?? 0;
+                    document.getElementById('ingestionRowsImported').textContent = data.rows_imported ?? 0;
+                    const errBox = document.getElementById('ingestionLastError');
+                    if (data.last_error) {
+                        errBox.style.display = 'block';
+                        errBox.textContent = 'Last error: ' + data.last_error;
+                    } else {
+                        errBox.style.display = 'none';
+                        errBox.textContent = '';
+                    }
+                })
+                .catch(() => {});
+        }
+
+        window.startIngestion = function(){
+            fetch('/api/ingestion/start/', { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': getCookie('csrftoken') } }).then(() => refreshIngestionStatus());
+        }
+
+        window.stopIngestion = function(){
+            fetch('/api/ingestion/stop/', { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': getCookie('csrftoken') } }).then(() => refreshIngestionStatus());
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            refreshIngestionStatus();
+            setInterval(refreshIngestionStatus, 5000);
+        });
+    </script>
+</div>
+
+
+

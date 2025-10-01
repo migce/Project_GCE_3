@@ -17,6 +17,10 @@ urlpatterns = [
     path('api/csv/files/', views.get_csv_files_api, name='csv_files_api'),
     path('api/csv/data/', views.get_csv_data_api, name='csv_data_api'),
     
+    # Data ingestion API
+    path('api/ingestion/status/', views.ingestion_status_api, name='ingestion_status'),
+    path('api/ingestion/start/', views.start_ingestion_service, name='start_ingestion'),
+    path('api/ingestion/stop/', views.stop_ingestion_service, name='stop_ingestion'),
     # Trading Systems API
     path('api/trading-systems/', views.api_trading_systems, name='api_trading_systems'),
     path('api/trading-systems/<int:system_id>/', views.api_trading_system_detail, name='api_trading_system_detail'),

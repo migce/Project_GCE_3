@@ -1,7 +1,8 @@
 from django.shortcuts import render
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
-from .models import MT5ConnectionSettings, MT5ConnectionLog, TradingSystem, TimeFrame, DataFile
+from .models import MT5ConnectionSettings, MT5ConnectionLog, TradingSystem, TimeFrame, DataFile, DataIngestionStatus
+from django.conf import settings as django_settings
 from .services.mt5_service import MT5Service
 import sys
 import platform
@@ -587,8 +588,8 @@ def get_monitoring_status_api(request):
 def raw_signals(request):
     """Raw Signals page for displaying TradeStation CSV exports"""
     
-    # TradeStation exports directory
-    ts_exports_dir = r'C:\TS_EXPORTS'
+    # TradeStation exports directory (from settings)
+    ts_exports_dir = getattr(django_settings, 'TS_EXPORTS_DIR', r'C:\\TS_EXPORTS')
     
     # Получаем количество торговых систем
     trading_systems_count = TradingSystem.objects.count()
@@ -605,8 +606,17 @@ def raw_signals(request):
 def get_csv_files_api(request):
     """API endpoint to get list of CSV files from TradeStation exports directory"""
     try:
-        ts_exports_dir = r'C:\TS_EXPORTS'
+        ts_exports_dir = getattr(django_settings, 'TS_EXPORTS_DIR', r'C:\\TS_EXPORTS')
         
+        # Optional per-system directory override
+        system_id = request.GET.get('system_id')
+        if system_id:
+            try:
+                system = TradingSystem.objects.get(id=system_id)
+                ts_exports_dir = system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
+            except TradingSystem.DoesNotExist:
+                pass
+
         if not os.path.exists(ts_exports_dir):
             return JsonResponse({
                 'success': False,
@@ -654,7 +664,15 @@ def get_csv_data_api(request):
                 'message': 'Filename parameter is required'
             })
         
-        ts_exports_dir = r'C:\TS_EXPORTS'
+        ts_exports_dir = getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
+        # Optional per-system directory override
+        system_id = request.GET.get('system_id')
+        if system_id:
+            try:
+                system = TradingSystem.objects.get(id=system_id)
+                ts_exports_dir = system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
+            except TradingSystem.DoesNotExist:
+                pass
         file_path = os.path.join(ts_exports_dir, filename)
         
         # Security check - ensure file is in the exports directory
@@ -729,6 +747,7 @@ def api_trading_systems(request):
                     'symbol': system.symbol,
                     'timeframes_count': system.timeframes_count,
                     'time_offset_minutes': system.time_offset_minutes,
+                    'data_dir': system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS'),
                     'created_at': system.created_at.strftime('%Y-%m-%d %H:%M:%S'),
                     'timeframes': []
                 }
@@ -780,6 +799,7 @@ def api_trading_system_detail(request, system_id):
                 'symbol': system.symbol,
                 'timeframes_count': system.timeframes_count,
                 'time_offset_minutes': system.time_offset_minutes,
+                'data_dir': system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS'),
                 'created_at': system.created_at.strftime('%Y-%m-%d %H:%M:%S'),
                 'timeframes': [],
                 'data_files': []
@@ -850,7 +870,7 @@ def api_validate_csv_for_system(request, system_id):
                 })
             
             # Полный путь к файлу
-            file_path = os.path.join(r'C:\TS_EXPORTS', filename)
+            file_path = os.path.join(system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS'), filename)
             
             if not os.path.exists(file_path):
                 return JsonResponse({
@@ -979,7 +999,7 @@ def api_process_csv_to_json(request, system_id):
                 })
             
             # Полный путь к файлу
-            file_path = os.path.join(r'C:\TS_EXPORTS', filename)
+            file_path = os.path.join(system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS'), filename)
             
             if not os.path.exists(file_path):
                 return JsonResponse({
@@ -1107,3 +1127,49 @@ def api_process_csv_to_json(request, system_id):
         'success': False,
         'message': 'Method not allowed'
     })
+
+
+def ingestion_status_api(request):
+    """API endpoint to get data ingestion worker status and KPIs"""
+    if request.method == 'GET':
+        st = DataIngestionStatus.get()
+        return JsonResponse({
+            'success': True,
+            'active': st.active,
+            'scan_interval': st.scan_interval,
+            'last_run': st.last_run.isoformat() if st.last_run else None,
+            'files_scanned': st.files_scanned,
+            'files_imported': st.files_imported,
+            'rows_imported': st.rows_imported,
+            'last_error': st.last_error or None,
+        })
+    return JsonResponse({'success': False, 'message': 'Only GET allowed'})
+
+
+def start_ingestion_service(request):
+    if request.method == 'POST':
+        try:
+            from .services.ingestion_worker import start_ingestion
+            start_ingestion()
+            st = DataIngestionStatus.get()
+            st.active = True
+            st.save(update_fields=['active', 'updated_at'])
+            return JsonResponse({'success': True, 'active': True, 'scan_interval': st.scan_interval})
+        except Exception as e:
+            return JsonResponse({'success': False, 'message': str(e)})
+    return JsonResponse({'success': False, 'message': 'Only POST allowed'})
+
+
+def stop_ingestion_service(request):
+    if request.method == 'POST':
+        try:
+            from .services.ingestion_worker import stop_ingestion
+            stop_ingestion()
+            st = DataIngestionStatus.get()
+            st.active = False
+            st.save(update_fields=['active', 'updated_at'])
+            return JsonResponse({'success': True, 'active': False})
+        except Exception as e:
+            return JsonResponse({'success': False, 'message': str(e)})
+    return JsonResponse({'success': False, 'message': 'Only POST allowed'})
+

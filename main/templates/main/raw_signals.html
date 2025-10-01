@@ -44,7 +44,7 @@
             <h3>📁 CSV Files</h3>
             <div class="header-actions">
                 <button class="btn btn-secondary" onclick="refreshFileList()">🔄 Refresh</button>
-                <span class="directory-info">Directory: {{ ts_exports_dir }}</span>
+                <span class="directory-info" id="directoryInfo">Directory: {{ ts_exports_dir }}</span>
             </div>
         </div>
         <div class="card-body">
@@ -211,6 +211,11 @@ function updateSystemInfo() {
                 <strong>Created:</strong> ${selectedTradingSystem.created_at}
             </div>
         `;
+        // Update directory display
+        const dirInfo = document.getElementById('directoryInfo');
+        if (dirInfo && selectedTradingSystem.data_dir) {
+            dirInfo.textContent = `Directory: ${selectedTradingSystem.data_dir}`;
+        }
     } else {
         infoDiv.textContent = 'No system selected';
     }
@@ -413,7 +418,9 @@ function hideAlert() {
 }
 
 function refreshFileList() {
-    fetch('/api/csv/files/')
+    const systemId = selectedTradingSystem ? selectedTradingSystem.id : '';
+    const url = systemId ? `/api/csv/files/?system_id=${systemId}` : '/api/csv/files/';
+    fetch(url)
         .then(response => response.json())
         .then(data => {
             const select = document.getElementById('csvFileSelect');
@@ -479,7 +486,9 @@ function loadSelectedFile() {
     document.getElementById('dataTitle').textContent = '⏳ Loading...';
     document.getElementById('signalsData').style.display = 'block';
     
-    fetch(`/api/csv/data/?filename=${encodeURIComponent(filename)}`)
+    const systemId = selectedTradingSystem ? selectedTradingSystem.id : '';
+    const dataUrl = systemId ? `/api/csv/data/?filename=${encodeURIComponent(filename)}&system_id=${systemId}` : `/api/csv/data/?filename=${encodeURIComponent(filename)}`;
+    fetch(dataUrl)
         .then(response => response.json())
         .then(data => {
             if (data.success) {

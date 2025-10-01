@@ -3,13 +3,16 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.utils.safestring import mark_safe
 from .models import (
-    MT5ConnectionSettings, 
-    MT5ConnectionLog, 
-    MT5ConnectionHealth, 
+    MT5ConnectionSettings,
+    MT5ConnectionLog,
+    MT5ConnectionHealth,
     MT5MonitoringSettings,
     TradingSystem,
     TimeFrame,
-    DataFile
+    DataFile,
+    IndicatorDefinition,
+    Bar,
+    IndicatorValue,
 )
 
 # Register your models here.
@@ -356,7 +359,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
             'fields': ('system_sid', 'name', 'symbol')
         }),
         ('Конфигурация', {
-            'fields': ('timeframes_count', 'time_offset_minutes', 'is_active')
+            'fields': ('timeframes_count', 'time_offset_minutes', 'data_dir', 'is_active')
         }),
         ('Дополнительно', {
             'fields': ('description',),
@@ -369,6 +372,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     )
     
     inlines = [TimeFrameInline]
+    actions = ['scan_data_files', 'import_pending_files']
     
     def system_status_icon(self, obj):
         if obj.is_active:
@@ -405,6 +409,73 @@ class TradingSystemAdmin(admin.ModelAdmin):
     
     file_pattern_info.short_description = 'Паттерн файлов'
 
+    def get_fieldsets(self, request, obj=None):
+        fs = list(super().get_fieldsets(request, obj))
+        # Ensure compatibility if model lacks data_dir
+        try:
+            has_data_dir = any(f.name == 'data_dir' for f in self.model._meta.get_fields())
+        except Exception:
+            has_data_dir = False
+        if not has_data_dir:
+            # Remove data_dir if present in second fieldset
+            new_fs = []
+            for name, opts in fs:
+                fields = list(opts.get('fields', ()))
+                if 'data_dir' in fields:
+                    fields = [f for f in fields if f != 'data_dir']
+                    opts = dict(opts)
+                    opts['fields'] = tuple(fields)
+                new_fs.append((name, opts))
+            fs = new_fs
+        return fs
+
+    def scan_data_files(self, request, queryset):
+        import os, glob
+        from .services.datafile_collector import collect_for_system
+        total_created = total_updated = total_skipped = 0
+        debug_lines = []
+        for system in queryset:
+            data_dir = system.get_data_dir() if hasattr(system, 'get_data_dir') else ''
+            pattern = os.path.join(data_dir, system.get_file_pattern()) if data_dir else ''
+            try:
+                found = glob.glob(pattern) if pattern else []
+            except Exception:
+                found = []
+        c, u, s = collect_for_system(system)
+        total_created += c
+        total_updated += u
+        total_skipped += s
+        debug_lines.append(f"{system.system_sid}: dir={data_dir}, pattern={system.get_file_pattern()}, matches={len(found)}")
+        if found:
+            preview = ", ".join(os.path.basename(f) for f in found[:3])
+            debug_lines.append(f"  e.g.: {preview}{' …' if len(found)>3 else ''}")
+        # surface any per-file errors from collector
+        errors = getattr(collect_for_system, 'last_errors', [])
+        if errors:
+            debug_lines.append(f"  errors: {len(errors)} → {errors[:2]}{' …' if len(errors)>2 else ''}")
+        self.message_user(
+            request,
+            "Scanned. Created: %d, Updated: %d, Unchanged: %d" % (total_created, total_updated, total_skipped)
+        )
+        if debug_lines:
+            self.message_user(request, " | ".join(debug_lines))
+    scan_data_files.short_description = 'Сканировать папку данных и обновить файлы'
+
+    def import_pending_files(self, request, queryset):
+        from .services.bar_importer import import_datafile
+        from .models import DataFile
+        ok = failed = 0
+        for system in queryset:
+            qs = DataFile.objects.filter(trading_system=system, status='pending')
+            for df in qs:
+                try:
+                    import_datafile(df)
+                    ok += 1
+                except Exception:
+                    failed += 1
+        self.message_user(request, f"Imported pending files → OK: {ok}, Failed: {failed}")
+    import_pending_files.short_description = 'Импортировать все pending файлы системы'
+
 
 @admin.register(TimeFrame)
 class TimeFrameAdmin(admin.ModelAdmin):
@@ -428,6 +499,7 @@ class TimeFrameAdmin(admin.ModelAdmin):
     ]
     
     ordering = ['trading_system', 'level']
+    actions = ['scan_selected_timeframes', 'import_pending_for_timeframes']
     
     def expected_filename(self, obj):
         return format_html('<code>{}</code>', obj.get_filename_pattern())
@@ -446,6 +518,61 @@ class TimeFrameAdmin(admin.ModelAdmin):
         return '0'
     
     files_count.short_description = 'Файлов'
+
+
+    def scan_selected_timeframes(self, request, queryset):
+        from .services.datafile_collector import collect_for_timeframe
+        total_created = total_updated = total_skipped = 0
+        for tf in queryset:
+            c, u, s = collect_for_timeframe(tf)
+            total_created += c
+            total_updated += u
+            total_skipped += s
+        self.message_user(
+            request,
+            f"Synced files. Created: {total_created}, Updated: {total_updated}, Unchanged: {total_skipped}"
+        )
+    scan_selected_timeframes.short_description = 'Сканировать файлы для выбранных таймфреймов'
+
+@admin.register(Bar)
+class BarAdmin(admin.ModelAdmin):
+    list_display = ['dt', 'timeframe', 'trading_system', 'open', 'high', 'low', 'close', 'volume', 'data_file']
+    list_filter = ['timeframe', 'trading_system']
+    search_fields = ['symbol']
+    date_hierarchy = 'dt'
+    ordering = ['-dt']
+    readonly_fields = [
+        'trading_system', 'timeframe', 'data_file', 'dt', 'open', 'high', 'low', 'close', 'volume', 'symbol', 'source_row'
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(IndicatorDefinition)
+class IndicatorDefinitionAdmin(admin.ModelAdmin):
+    list_display = ['trading_system', 'name', 'dtype']
+    list_filter = ['trading_system', 'dtype']
+    search_fields = ['name', 'trading_system__system_sid']
+    ordering = ['trading_system', 'name']
+
+
+@admin.register(IndicatorValue)
+class IndicatorValueAdmin(admin.ModelAdmin):
+    list_display = ['bar', 'indicator', 'tf_level', 'value_int']
+    list_filter = ['indicator__trading_system', 'indicator', 'tf_level']
+    search_fields = ['indicator__name']
+    date_hierarchy = 'bar__dt'
+    readonly_fields = ['bar', 'indicator', 'tf_level', 'value_int']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(DataFile)
@@ -489,7 +616,7 @@ class DataFileAdmin(admin.ModelAdmin):
         }),
     )
     
-    actions = ['reprocess_files', 'mark_as_pending']
+    actions = ['reprocess_files', 'mark_as_pending', 'import_to_db']
     
     def file_status_icon(self, obj):
         status_colors = {
@@ -533,6 +660,23 @@ class DataFileAdmin(admin.ModelAdmin):
     
     json_preview.short_description = 'Предпросмотр JSON'
     
+    def import_to_db(self, request, queryset):
+        from .services.bar_importer import import_datafile
+        ok = 0
+        failed = 0
+        details = []
+        for df in queryset:
+            try:
+                res = import_datafile(df)
+                ok += 1
+                details.append(f"{df.filename}: bars={res.bars_created}, indVals={res.indicator_values_created}")
+            except Exception as e:
+                failed += 1
+                details.append(f"{df.filename}: ERROR {e}")
+        summary = f"Imported: {ok}, Failed: {failed}. " + (" | ".join(details[:3]) + (" …" if len(details) > 3 else ""))
+        self.message_user(request, summary)
+    import_to_db.short_description = 'Импортировать выбранные файлы в БД'
+
     def reprocess_files(self, request, queryset):
         updated = queryset.update(status='pending', error_message='', processed_at=None)
         self.message_user(request, f'{updated} файлов помечены для повторной обработки.')
@@ -550,3 +694,9 @@ class DataFileAdmin(admin.ModelAdmin):
 admin.site.site_header = "Project GCE 3 - Админ панель"
 admin.site.site_title = "Project GCE 3"
 admin.site.index_title = "Управление MT5 & Торговыми системами"
+
+
+
+
+
+

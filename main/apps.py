@@ -1,6 +1,7 @@
 from django.apps import AppConfig
 import logging
 import sys
+from django.db.models.signals import post_migrate
 
 logger = logging.getLogger(__name__)
 
@@ -10,28 +11,22 @@ class MainConfig(AppConfig):
     name = 'main'
     
     def ready(self):
-        """Called when Django is ready"""
-        # Import here to avoid circular imports
-        import os
-        from django.conf import settings
-        
-        # Only perform setup during runserver, skip during migrations/shell
-        if 'runserver' in sys.argv:
-            self._initialize_monitoring_settings()
-            logger.info("Django ready - MT5 monitoring will be controlled via web interface")
+        """Connect lazy initialization hooks to avoid DB access during app import."""
+        def _post_migrate_init(sender, **kwargs):
+            try:
+                self._initialize_monitoring_settings()
+            except Exception as e:
+                logger.warning(f"Monitoring settings init skipped: {e}")
+
+        # Use post_migrate hook to avoid touching DB during app import
+        post_migrate.connect(_post_migrate_init, sender=self)
+        logger.info("Main app ready; monitoring settings will initialize after migrations")
     
     def _initialize_monitoring_settings(self):
         """Initialize monitoring settings without auto-starting"""
         try:
             from .models import MT5MonitoringSettings
-            
-            # Ensure monitoring settings exist
             monitoring_settings = MT5MonitoringSettings.get_settings()
-            logger.info(f"Monitoring settings initialized - enabled: {monitoring_settings.monitoring_enabled}")
-            
-            # If monitoring was enabled but service isn't running, user can start it from web interface
-            if monitoring_settings.monitoring_enabled:
-                logger.info("Monitoring is enabled - use web interface to start service")
-                
+            logger.info(f"Monitoring settings present - enabled: {monitoring_settings.monitoring_enabled}")
         except Exception as e:
-            logger.warning(f"Could not initialize monitoring settings: {e}")
+            logger.debug(f"Monitoring settings not available yet: {e}")

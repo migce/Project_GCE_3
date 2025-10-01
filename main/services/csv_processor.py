@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Any, Tuple, Optional
 from django.utils import timezone
+from django.conf import settings as django_settings
 from ..models import TradingSystem, TimeFrame, DataFile
 
 
@@ -23,7 +24,11 @@ class CSVProcessor:
             trading_system: Экземпляр модели TradingSystem
         """
         self.trading_system = trading_system
-        self.csv_exports_path = r'C:\TS_EXPORTS'
+        # Prefer per-system directory, fallback to global setting
+        try:
+            self.csv_exports_path = trading_system.get_data_dir()
+        except Exception:
+            self.csv_exports_path = getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
     
     def detect_delimiter(self, file_path: str) -> str:
         """
