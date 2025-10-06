@@ -15,7 +15,8 @@ from datetime import datetime, timezone as dt_timezone
 
 from django.utils import timezone
 
-from ..models import TradingSystem, DataFile, DataIngestionStatus, ImportLog
+from ..models import TradingSystem, DataFile, DataIngestionStatus, ImportLog, SignalEvent
+from .signal_engine import generate_signals_for_system
 from .datafile_collector import collect_for_system
 from .bar_importer import import_datafile
 
@@ -88,6 +89,24 @@ class DataIngestionWorker:
                                     file_size=st.st_size,
                                     file_modified=datetime.fromtimestamp(st.st_mtime, tz=dt_timezone.utc),
                                 )
+                                # Generate signals for the affected trading system (last N bars)
+                                try:
+                                    events = generate_signals_for_system(df.trading_system, limit_bars=1000)
+                                    for ev in events:
+                                        obj, created = SignalEvent.objects.get_or_create(
+                                            trading_system=ev.trading_system,
+                                            timeframe=ev.timeframe,
+                                            event_time=ev.event_time,
+                                            direction=ev.direction,
+                                            action=getattr(ev, 'action', 'OPEN'),
+                                            defaults={'rule_text': ev.rule_text, 'bar': ev.bar},
+                                        )
+                                        if not created and obj.bar_id is None and ev.bar_id:
+                                            obj.bar = ev.bar
+                                            obj.save(update_fields=['bar'])
+                                except Exception:
+                                    # Do not fail the worker if signal generation has issues
+                                    pass
                             except Exception as imp_err:
                                 # Log error and continue to next file
                                 ImportLog.objects.create(

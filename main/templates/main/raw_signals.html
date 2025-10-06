@@ -19,6 +19,31 @@
           </div>
           <div style="color:#6c757d; margin-top:0.25rem;">Symbol: {{ s.symbol }}</div>
           <div style="margin-top:1rem;">
+            {% if s.signals %}
+            <h4 style="margin:0 0 0.5rem 0;">Recent Signals (last 10)</h4>
+            <table class="table" style="width:100%; margin-bottom:1rem;">
+              <thead>
+                <tr>
+                  <th style="width:28%;">Time</th>
+                  <th style="width:12%;">Direction</th>
+                  <th style="width:20%;">Close</th>
+                  <th style="width:20%;">PnL (pips)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for sig in s.signals %}
+                <tr>
+                  <td>{{ sig.time|date:"Y-m-d H:i:s" }}</td>
+                  <td>{{ sig.direction }}</td>
+                  <td>{% if sig.close %}{{ sig.close|floatformat:5 }}{% else %}-{% endif %}</td>
+                  <td>{% if sig.pips is not None %}{{ sig.pips|floatformat:1 }}{% else %}-{% endif %}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <div style="margin-bottom:0.5rem; color:#6c757d;">Total (last 10): <strong>{% if s.signals_total_pips %}{{ s.signals_total_pips|floatformat:1 }}{% else %}0{% endif %} pips</strong></div>
+            {% endif %}
+            
             {% if s.timeframes %}
             <table class="table" style="width:100%;">
               <thead>

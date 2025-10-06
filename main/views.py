@@ -3,9 +3,20 @@ from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Max
-from .models import MT5ConnectionSettings, MT5ConnectionLog, TradingSystem, TimeFrame, DataFile, DataIngestionStatus, ImportLog, Bar
+from .models import (
+    MT5ConnectionSettings,
+    MT5ConnectionLog,
+    TradingSystem,
+    TimeFrame,
+    DataFile,
+    DataIngestionStatus,
+    ImportLog,
+    Bar,
+    SignalEvent,
+    TradingSystemSignalSettings,
+)
 from django.conf import settings as django_settings
-from .services.mt5_service import MT5Service
+from .services.mt5_service import MT5Service, MT5Manager
 import sys
 import platform
 from datetime import datetime
@@ -14,6 +25,7 @@ import csv
 import glob
 from pathlib import Path
 import json
+from django.views.decorators.csrf import ensure_csrf_cookie
 
 # Create your views here.
 
@@ -1212,12 +1224,53 @@ def raw_signals_overview(request):
                 'last_dt': last_by_tf.get(tf.id),
                 'last_server_dt': last_by_tf.get(tf.id),
             })
+
+        # Build recent signals (last 10) with Close and PnL in pips
+        signals_rows = []
+        total_pips = 0.0
+        try:
+            base_level = getattr(sys.signal_settings, 'signal_base_tf_level', None) or 1
+        except Exception:
+            base_level = 1
+        base_tf = next((x for x in tfs if getattr(x, 'level', None) == base_level), None)
+        if base_tf:
+            evs = list(SignalEvent.objects.filter(trading_system=sys, timeframe=base_tf, action='OPEN').order_by('-event_time')[:11])
+
+            def get_close(ev):
+                if getattr(ev, 'bar', None) and ev.bar and ev.bar.close is not None:
+                    return float(ev.bar.close)
+                b = Bar.objects.filter(timeframe=ev.timeframe, dt_server=ev.event_time).first()
+                if not b:
+                    b = Bar.objects.filter(timeframe=ev.timeframe, dt=ev.event_time).first()
+                return float(b.close) if b and b.close is not None else None
+
+            pip_scale = 100 if 'JPY' in (sys.symbol or '').upper() else 10000
+            # We show PnL on the previous (older) signal row, because the trade is closed at the current signal.
+            # evs is newest->oldest; for row i>0 we compute PnL between evs[i] (older, opened here) and evs[i-1] (newer, closed here).
+            for i, ev in enumerate(evs[:10]):
+                close_cur = get_close(ev)
+                pnl = None
+                if i > 0:
+                    newer = evs[i - 1]
+                    close_newer = get_close(newer)
+                    if close_cur is not None and close_newer is not None:
+                        pnl = (close_newer - close_cur) * pip_scale if ev.direction == 'BUY' else (close_cur - close_newer) * pip_scale
+                        total_pips += pnl
+                signals_rows.append({
+                    'time': ev.event_time,
+                    'direction': ev.direction,
+                    'close': close_cur,
+                    'pips': pnl,
+                })
+
         systems.append({
             'id': sys.id,
             'system_sid': sys.system_sid,
             'symbol': sys.symbol,
             'timeframes_count': getattr(sys, 'timeframes_count', len(tfs)),
             'timeframes': tf_infos,
+            'signals': signals_rows,
+            'signals_total_pips': total_pips,
         })
 
     return render(request, 'main/raw_signals.html', {'systems': systems})
@@ -1235,4 +1288,460 @@ def stop_ingestion_service(request):
         except Exception as e:
             return JsonResponse({'success': False, 'message': str(e)})
     return JsonResponse({'success': False, 'message': 'Only POST allowed'})
+
+
+# --- Trading history derived from signals ---
+def _get_close_for_event(ev):
+    try:
+        if ev.bar and ev.bar.close is not None:
+            return float(ev.bar.close)
+    except Exception:
+        pass
+    try:
+        b = Bar.objects.filter(timeframe=ev.timeframe, dt_server=ev.event_time).first()
+        if not b:
+            b = Bar.objects.filter(timeframe=ev.timeframe, dt=ev.event_time).first()
+        if b and b.close is not None:
+            return float(b.close)
+    except Exception:
+        pass
+    return None
+
+
+def trading_history_ts(request):
+    systems = list(TradingSystem.objects.all().order_by('system_sid'))
+    system_id = request.GET.get('system')
+    tf_level = request.GET.get('tf')
+    limit = int(request.GET.get('limit') or 200)
+
+    system = None
+    if system_id:
+        try:
+            system = TradingSystem.objects.get(id=system_id)
+        except TradingSystem.DoesNotExist:
+            system = None
+    if not system and systems:
+        system = systems[0]
+
+    trades = []
+    total_pips = 0.0
+    wins = 0
+    total = 0
+    selected_tf = None
+    base_level = 1
+    if system:
+        try:
+            base_level = getattr(system, 'signal_settings', None).signal_base_tf_level or 1
+        except Exception:
+            base_level = 1
+        if tf_level:
+            try:
+                base_level = int(tf_level)
+            except Exception:
+                pass
+        selected_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+        if selected_tf:
+            events = list(SignalEvent.objects.filter(trading_system=system, timeframe=selected_tf, action='OPEN')
+                          .order_by('-event_time')[:limit+1])
+            pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
+            for i in range(len(events)-1, 0, -1):
+                open_ev = events[i]
+                close_ev = events[i-1]
+                open_price = _get_close_for_event(open_ev)
+                close_price = _get_close_for_event(close_ev)
+                pnl = None
+                if open_price is not None and close_price is not None:
+                    pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                    total_pips += pnl
+                    total += 1
+                    if pnl > 0:
+                        wins += 1
+                trades.append({
+                    'open_time': open_ev.event_time,
+                    'open_dir': open_ev.direction,
+                    'open_price': open_price,
+                    'close_time': close_ev.event_time,
+                    'close_price': close_price,
+                    'pips': pnl,
+                })
+
+    win_rate = (wins / total * 100.0) if total else 0.0
+
+    context = {
+        'systems': systems,
+        'selected_system': system,
+        'selected_tf': selected_tf,
+        'base_level': base_level,
+        'trades': list(reversed(trades)),
+        'total_pips': total_pips,
+        'win_rate': win_rate,
+        'total_trades': total,
+    }
+    return render(request, 'main/trading_history_ts.html', context)
+
+
+def trading_history_mt5(request):
+    systems = list(MT5ConnectionSettings.objects.all().order_by('-is_default', 'name'))
+    systems_magic = list(TradingSystem.objects.filter(magic_number__isnull=False).order_by('system_sid'))
+    settings_id = request.GET.get('conn')
+    sys_magic_id = request.GET.get('sys')
+    days = int(request.GET.get('days') or 7)
+    selected = None
+    if settings_id:
+        try:
+            selected = MT5ConnectionSettings.objects.get(id=settings_id)
+        except MT5ConnectionSettings.DoesNotExist:
+            selected = None
+    if not selected and systems:
+        selected = systems[0]
+
+    deals = []
+    summary = {'trades': 0, 'profit': 0.0}
+    error = None
+    selected_system = None
+    selected_magic = None
+    if sys_magic_id:
+        try:
+            selected_system = TradingSystem.objects.get(id=sys_magic_id)
+            selected_magic = selected_system.magic_number
+        except TradingSystem.DoesNotExist:
+            selected_system = None
+    if selected:
+        try:
+            from .services.mt5_service import MT5Service
+            from datetime import datetime, timedelta, timezone as dt_tz
+            import MetaTrader5 as mt5
+            with MT5Service(selected) as svc:
+                if svc.is_connected:
+                    try:
+                        acc = mt5.account_info()
+                        context_account_login = getattr(acc, 'login', None)
+                    except Exception:
+                        context_account_login = None
+                    # Direct calls history_deals_get with different variants (no history_select)
+                    raw = []
+                    attempts = []
+
+                    def try_direct(frm, to, label):
+                        try:
+                            res = mt5.history_deals_get(frm, to)
+                        except Exception:
+                            res = None
+                        cnt = len(res) if res else 0
+                        attempts.append((label, cnt))
+                        return res or []
+
+                    try:
+                        import calendar
+                    except Exception:
+                        calendar = None
+
+                    now_local = datetime.now()
+                    now_utc_naive = datetime.utcnow()
+                    now_utc_aware = now_utc_naive.replace(tzinfo=dt_tz.utc)
+
+                    # 1) Local naive
+                    raw = try_direct(now_local - timedelta(days=days), now_local, 'local-naive-dt')
+                    # 2) Naive UTC
+                    if not raw:
+                        raw = try_direct(now_utc_naive - timedelta(days=days), now_utc_naive, 'utc-naive-dt')
+                    # 3) Aware UTC
+                    if not raw:
+                        raw = try_direct(now_utc_aware - timedelta(days=days), now_utc_aware, 'utc-aware-dt')
+                    # 4) Epoch seconds UTC
+                    if not raw and calendar is not None:
+                        try:
+                            frm_ts = calendar.timegm((now_utc_naive - timedelta(days=days)).timetuple())
+                            to_ts = calendar.timegm(now_utc_naive.timetuple())
+                            raw = try_direct(frm_ts, to_ts, 'utc-epoch-seconds')
+                        except Exception:
+                            pass
+                    # 5) Wider margin
+                    if not raw:
+                        raw = try_direct(now_local - timedelta(days=days+1), now_local + timedelta(days=1), 'local-margin')
+
+                    if not raw:
+                        err = mt5.last_error()
+                        error = f"No deals for period. last_error: {err}; attempts={attempts}"
+                    for d in raw:
+                        # Filter only buy/sell (ignore balance operations)
+                        t = getattr(d, 'type', None)
+                        typ = 'BUY' if t == 0 else ('SELL' if t == 1 else None)
+                        if not typ:
+                            continue
+                        if selected_magic is not None and getattr(d, 'magic', None) != selected_magic:
+                            continue
+                        # d.time is in seconds (broker server time). Keep naive local display or convert to UTC consistently.
+                        deals.append({
+                            'time': datetime.fromtimestamp(getattr(d, 'time', 0) or 0),
+                            'symbol': d.symbol,
+                            'direction': typ,
+                            'volume': float(getattr(d, 'volume', 0) or 0),
+                            'price': float(getattr(d, 'price', 0) or 0),
+                            'profit': float(getattr(d, 'profit', 0) or 0),
+                            'comment': getattr(d, 'comment', ''),
+                            'ticket': getattr(d, 'ticket', None),
+                            'magic': getattr(d, 'magic', None),
+                        })
+                        summary['trades'] += 1
+                        summary['profit'] += float(getattr(d, 'profit', 0) or 0)
+                else:
+                    error = 'MT5 connection failed'
+        except Exception as e:
+            error = str(e)
+
+    context = {
+        'connections': systems,
+        'systems_magic': systems_magic,
+        'selected_system_magic': selected_system,
+        'selected_conn': selected,
+        'days': days,
+        'deals': sorted(deals, key=lambda x: x['time'], reverse=True)[:500],
+        'summary': summary,
+        'error': error,
+        'connected_login': locals().get('context_account_login'),
+    }
+    return render(request, 'main/trading_history_mt5.html', context)
+
+
+def trading_home(request):
+    systems = TradingSystem.objects.all().order_by('system_sid')
+    context = {
+        'systems_count': systems.count(),
+    }
+    return render(request, 'main/trading_home.html', context)
+
+
+@ensure_csrf_cookie
+def trading_positions(request):
+    """Show current open positions from MetaTrader 5."""
+    positions = []
+    error = None
+    account = None
+
+    try:
+        service = MT5Manager.get_default_service()
+        if not service:
+            error = 'Default MT5 connection settings are not configured.'
+        else:
+            with service as svc:
+                if svc.is_connected:
+                    account = svc.get_account_info()
+                    positions = svc.get_open_positions()
+                else:
+                    error = 'Failed to connect to MT5.'
+    except Exception as e:
+        error = str(e)
+
+    context = {
+        'positions': positions,
+        'account': account,
+        'error': error,
+    }
+    return render(request, 'main/trading_positions.html', context)
+
+
+# --- Manual trading API ---
+from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+
+
+@require_POST
+def mt5_trade_buy(request):
+    symbol = request.POST.get('symbol') or request.GET.get('symbol') or 'EURUSD'
+    try:
+        volume = float(request.POST.get('volume') or request.GET.get('volume') or 0.01)
+    except Exception:
+        volume = 0.01
+    service = MT5Manager.get_default_service()
+    if not service:
+        return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'})
+
+    with service as svc:
+        if not svc.is_connected:
+            return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'})
+        res = svc.market_buy(symbol, volume)
+        return JsonResponse(res)
+
+
+@require_POST
+def mt5_trade_sell(request):
+    symbol = request.POST.get('symbol') or request.GET.get('symbol') or 'EURUSD'
+    try:
+        volume = float(request.POST.get('volume') or request.GET.get('volume') or 0.01)
+    except Exception:
+        volume = 0.01
+    service = MT5Manager.get_default_service()
+    if not service:
+        return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'})
+
+    with service as svc:
+        if not svc.is_connected:
+            return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'})
+        res = svc.market_sell(symbol, volume)
+        return JsonResponse(res)
+
+
+@require_POST
+def mt5_close_all(request):
+    side = request.POST.get('side') or request.GET.get('side')
+    if side:
+        side = side.upper()
+        if side not in ('BUY', 'SELL'):
+            side = None
+    service = MT5Manager.get_default_service()
+    if not service:
+        return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'})
+    with service as svc:
+        if not svc.is_connected:
+            return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'})
+        res = svc.close_all(only_type=side)
+        return JsonResponse(res)
+
+
+@require_POST
+def mt5_close_position(request):
+    try:
+        ticket = int(request.POST.get('ticket') or request.GET.get('ticket'))
+    except Exception:
+        return JsonResponse({'success': False, 'message': 'Ticket is required'})
+    service = MT5Manager.get_default_service()
+    if not service:
+        return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'})
+    with service as svc:
+        if not svc.is_connected:
+            return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'})
+        res = svc.close_position(ticket)
+        return JsonResponse(res)
+
+
+@ensure_csrf_cookie
+def system_trading(request):
+    systems = TradingSystem.objects.all().order_by('system_sid')
+    return render(request, 'main/system_trading.html', { 'systems': systems })
+
+
+from django.views.decorators.http import require_POST
+
+@require_POST
+def api_system_trading_update(request):
+    try:
+        sid = int(request.POST.get('id'))
+    except Exception:
+        return JsonResponse({'success': False, 'message': 'Invalid system id'})
+    enabled_raw = request.POST.get('enabled')
+    lot_raw = request.POST.get('lot')
+    try:
+        sys = TradingSystem.objects.get(id=sid)
+    except TradingSystem.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'System not found'})
+    # Parse values
+    enabled = True if str(enabled_raw) in ('1', 'true', 'True', 'on') else False
+    try:
+        lot = float((lot_raw or '0.01').replace(',', '.'))
+        if lot <= 0:
+            raise ValueError('Lot must be positive')
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': f'Invalid lot: {e}'})
+    # Save
+    sys.trading_enabled = enabled
+    sys.lot_size = lot
+    sys.save(update_fields=['trading_enabled', 'lot_size'])
+    return JsonResponse({'success': True})
+
+
+from django.views.decorators.http import require_GET
+
+@require_GET
+def api_system_positions(request):
+    try:
+        sid = int(request.GET.get('id'))
+    except Exception:
+        return JsonResponse({'success': False, 'message': 'Invalid system id'})
+    try:
+        sys = TradingSystem.objects.get(id=sid)
+    except TradingSystem.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'System not found'})
+    try:
+        service = MT5Manager.get_default_service()
+        if not service:
+            return JsonResponse({'success': False, 'message': 'MT5 default service not configured'})
+        positions = []
+        from datetime import datetime as _dt
+        with service as svc:
+            if svc.is_connected:
+                sys_magic = getattr(sys, 'magic_number', None)
+                raw = svc.get_open_positions_for(symbol=sys.symbol, magic=sys_magic)
+                # Fallback: if ничего не нашли по magic, попробуем по одному символу (включая manual trades с magic=0)
+                if not raw:
+                    raw = svc.get_open_positions_for(symbol=sys.symbol, magic=None)
+                # Normalize datetime for JSON
+                for p in raw:
+                    q = dict(p)
+                    t = q.get('time')
+                    if hasattr(t, 'strftime'):
+                        q['time'] = t.strftime('%Y-%m-%d %H:%M:%S')
+                    positions.append(q)
+        return JsonResponse({'success': True, 'positions': positions})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
+
+
+@require_GET
+def api_system_deals(request):
+    try:
+        sid = int(request.GET.get('id'))
+    except Exception:
+        return JsonResponse({'success': False, 'message': 'Invalid system id'})
+    days = int(request.GET.get('days') or 7)
+    try:
+        sys = TradingSystem.objects.get(id=sid)
+    except TradingSystem.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'System not found'})
+
+    try:
+        import MetaTrader5 as mt5
+        from datetime import datetime, timedelta, timezone as dt_tz
+        service = MT5Manager.get_default_service()
+        deals = []
+        with service as svc:
+            if svc and svc.is_connected:
+                to_naive_utc = datetime.utcnow()
+                from_naive_utc = to_naive_utc - timedelta(days=days)
+                raw = mt5.history_deals_get(from_naive_utc, to_naive_utc) or []
+                magic = getattr(sys, 'magic_number', None)
+                # 1) Сначала пробуем строгий фильтр symbol+magic
+                strict = []
+                for d in raw:
+                    t = getattr(d, 'type', None)
+                    typ = 'BUY' if t == 0 else ('SELL' if t == 1 else None)
+                    if not typ:
+                        continue
+                    if getattr(d, 'symbol', '') != (sys.symbol or ''):
+                        continue
+                    if magic is not None and getattr(d, 'magic', None) != magic:
+                        continue
+                    strict.append(d)
+                used = strict
+                # 2) Если ничего не нашли по magic, ослабляем до symbol-only (поддержка ручных сделок с magic=0)
+                if magic is not None and not strict:
+                    used = [d for d in raw if getattr(d, 'symbol', '') == (sys.symbol or '') and getattr(d, 'type', None) in (0, 1)]
+                for d in used:
+                    t = getattr(d, 'type', None)
+                    typ = 'BUY' if t == 0 else ('SELL' if t == 1 else None)
+                    deals.append({
+                        'time': datetime.fromtimestamp(getattr(d, 'time', 0) or 0).strftime('%Y-%m-%d %H:%M:%S'),
+                        'symbol': d.symbol,
+                        'direction': typ,
+                        'volume': float(getattr(d, 'volume', 0) or 0),
+                        'price': float(getattr(d, 'price', 0) or 0),
+                        'profit': float(getattr(d, 'profit', 0) or 0),
+                        'ticket': getattr(d, 'ticket', None),
+                    })
+        return JsonResponse({'success': True, 'deals': deals[:500]})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
+
+
+
 

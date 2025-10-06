@@ -22,6 +22,7 @@ class MT5Service:
         """
         self.settings = settings or MT5ConnectionSettings.get_default_settings()
         self.is_connected = False
+        self._filling_cache: Dict[str, int] = {}
         
     def connect(self) -> bool:
         """
@@ -293,6 +294,440 @@ class MT5Service:
             logger.error(f"Ошибка обновления данных счета: {str(e)}")
         
         return False
+
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        """
+        Get current open positions from MetaTrader 5.
+
+        Returns:
+            list: List of positions as dictionaries
+        """
+        if not self.is_connected:
+            return []
+
+        try:
+            positions = mt5.positions_get()
+            result: List[Dict[str, Any]] = []
+            if not positions:
+                return result
+
+            for p in positions:
+                # Map MT5 position tuple to dict
+                try:
+                    pos_type = 'BUY' if int(getattr(p, 'type', 0) or 0) == 0 else 'SELL'
+                except Exception:
+                    pos_type = str(getattr(p, 'type', ''))
+
+                opened_ts = getattr(p, 'time', None)
+                opened_at = None
+                if opened_ts:
+                    try:
+                        opened_at = datetime.fromtimestamp(opened_ts)
+                    except Exception:
+                        opened_at = None
+
+                result.append({
+                    'ticket': getattr(p, 'ticket', None),
+                    'symbol': getattr(p, 'symbol', ''),
+                    'type': pos_type,
+                    'volume': float(getattr(p, 'volume', 0) or 0),
+                    'price_open': float(getattr(p, 'price_open', 0) or 0),
+                    'sl': float(getattr(p, 'sl', 0) or 0),
+                    'tp': float(getattr(p, 'tp', 0) or 0),
+                    'price_current': float(getattr(p, 'price_current', 0) or 0),
+                    'profit': float(getattr(p, 'profit', 0) or 0),
+                    'swap': float(getattr(p, 'swap', 0) or 0),
+                    'commission': float(getattr(p, 'commission', 0) or 0) if hasattr(p, 'commission') else None,
+                    'comment': getattr(p, 'comment', ''),
+                    'magic': getattr(p, 'magic', None),
+                    'time': opened_at,
+                })
+
+            return result
+        except Exception as e:
+            logger.error(f"Error fetching MT5 positions: {str(e)}")
+            return []
+
+    def get_open_positions_for(self, symbol: Optional[str] = None, magic: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Filter open positions by symbol and/or magic."""
+        allp = self.get_open_positions() or []
+        res = []
+        for p in allp:
+            if symbol and p.get('symbol') != symbol:
+                continue
+            if magic is not None and p.get('magic') != magic:
+                continue
+            res.append(p)
+        return res
+
+    # --- Trading actions ---
+    def _ensure_symbol(self, symbol: str) -> bool:
+        try:
+            info = mt5.symbol_info(symbol)
+            if info and info.visible:
+                return True
+            # Try to select even if info is None (symbol might be hidden)
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+            info2 = mt5.symbol_info(symbol)
+            if info2 and info2.visible:
+                return True
+            # Fallback: attempt case-insensitive or suffix match (e.g., EURUSD.r)
+            try:
+                allsyms = mt5.symbols_get()
+            except Exception:
+                allsyms = None
+            if allsyms:
+                target = symbol.upper()
+                cand = None
+                for s in allsyms:
+                    if getattr(s, 'name', '').upper() == target:
+                        cand = s.name
+                        break
+                if not cand:
+                    for s in allsyms:
+                        n = getattr(s, 'name', '').upper()
+                        if n.startswith(target):
+                            cand = s.name
+                            break
+                if cand:
+                    try:
+                        mt5.symbol_select(cand, True)
+                    except Exception:
+                        pass
+                    info3 = mt5.symbol_info(cand)
+                    if info3 and info3.visible:
+                        return True
+            return False
+        except Exception:
+            return False
+
+    def _resolve_trade_symbol(self, symbol: str) -> Optional[str]:
+        """Return a visible symbol name suitable for trading.
+
+        Tries the provided name, and if not available, searches for a case-insensitive
+        or suffix-matching variant (e.g., EURUSD.r). Ensures the symbol is selected.
+        """
+        try:
+            info = mt5.symbol_info(symbol)
+            if info and info.visible:
+                return symbol
+            # Try to select the provided as-is
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+            info2 = mt5.symbol_info(symbol)
+            if info2 and info2.visible:
+                return symbol
+            # Scan available symbols for a match
+            try:
+                allsyms = mt5.symbols_get()
+            except Exception:
+                allsyms = None
+            if allsyms:
+                target = symbol.upper()
+                for s in allsyms:
+                    if getattr(s, 'name', '').upper() == target:
+                        mt5.symbol_select(s.name, True)
+                        return s.name
+                for s in allsyms:
+                    n = getattr(s, 'name', '').upper()
+                    if n.startswith(target):
+                        mt5.symbol_select(s.name, True)
+                        return s.name
+            return None
+        except Exception:
+            return None
+
+    def _get_tick(self, symbol: str) -> Optional[Any]:
+        try:
+            return mt5.symbol_info_tick(symbol)
+        except Exception:
+            return None
+
+    def _filling_candidates(self, symbol: str) -> List[int]:
+        cands: List[int] = []
+        for name in ('ORDER_FILLING_RETURN', 'ORDER_FILLING_IOC', 'ORDER_FILLING_FOK'):
+            val = getattr(mt5, name, None)
+            if isinstance(val, int) and val not in cands:
+                cands.append(val)
+        if not cands:
+            cands = [0, 1, 2]
+        return cands
+
+    def _order_send_with_filling(self, base_request: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+        last = None
+        for fill in self._filling_candidates(symbol):
+            req = dict(base_request)
+            req['type_filling'] = fill
+            try:
+                result = mt5.order_send(req)
+                retcode = getattr(result, 'retcode', None)
+                success = retcode == getattr(mt5, 'TRADE_RETCODE_DONE', 10009)
+                if success:
+                    return {
+                        'success': True,
+                        'retcode': retcode,
+                        'message': str(result),
+                        'order': getattr(result, 'order', None),
+                        'deal': getattr(result, 'deal', None),
+                        'filling_used': fill,
+                    }
+                last = {
+                    'success': False,
+                    'retcode': retcode,
+                    'message': str(result),
+                    'filling_used': fill,
+                }
+            except Exception as e:
+                last = {'success': False, 'message': f'order_send error: {str(e)}', 'filling_used': fill}
+        return last or {'success': False, 'message': 'order_send failed'}
+
+    def resolve_filling_mode(self, symbol: str, probe_request: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Resolve and cache a working filling mode for a symbol.
+
+        Strategy:
+        - Build candidate list (symbol_info.filling_mode first if present),
+          completed by RETURN → IOC → FOK.
+        - If probe_request provided, validate candidates with mt5.order_check
+          to avoid send-time errors (e.g., retcode 10030 Unsupported filling).
+        - Cache first acceptable mode and return it.
+        """
+        if symbol in self._filling_cache:
+            return self._filling_cache[symbol]
+
+        # Candidate list
+        cands: List[int] = []
+        try:
+            info = mt5.symbol_info(symbol)
+            mode = getattr(info, 'filling_mode', None) if info else None
+            if isinstance(mode, int):
+                cands.append(mode)
+        except Exception:
+            pass
+        for name in ('ORDER_FILLING_RETURN', 'ORDER_FILLING_IOC', 'ORDER_FILLING_FOK'):
+            val = getattr(mt5, name, None)
+            if isinstance(val, int) and val not in cands:
+                cands.append(val)
+
+        # If we cannot probe, pick the first candidate (still cached)
+        if not probe_request:
+            chosen = cands[0] if cands else None
+            if chosen is not None:
+                self._filling_cache[symbol] = chosen
+            return chosen
+
+        # Probe with order_check to avoid unsupported modes
+        for fill in cands:
+            req = dict(probe_request)
+            req['type_filling'] = fill
+            try:
+                check = mt5.order_check(req)
+                retcode = getattr(check, 'retcode', None)
+                # 10030 = TRADE_RETCODE_INVALID_FILL/UNSUPPORTED FILLING
+                if retcode == 10030:
+                    continue
+                # Acceptable: anything that's not invalid fill. Even if NO_MONEY etc.,
+                # we only care about a working filling mode.
+                self._filling_cache[symbol] = fill
+                return fill
+            except Exception:
+                # If order_check fails, try next
+                continue
+
+        # Last resort: cache first candidate if exists
+        chosen = cands[0] if cands else None
+        if chosen is not None:
+            self._filling_cache[symbol] = chosen
+        return chosen
+
+    def market_buy(self, symbol: str, volume: float, deviation: int = 20, comment: str = 'GCE3 BUY', magic: Optional[int] = None) -> Dict[str, Any]:
+        if not self.is_connected:
+            return {'success': False, 'message': 'Not connected to MT5'}
+        if not symbol:
+            return {'success': False, 'message': 'Symbol is required'}
+        try:
+            if volume is None or float(volume) <= 0:
+                return {'success': False, 'message': 'Volume must be > 0'}
+        except Exception:
+            return {'success': False, 'message': 'Invalid volume'}
+        resolved = self._resolve_trade_symbol(symbol)
+        if not resolved:
+            return {'success': False, 'message': f'Symbol not available: {symbol}'}
+        tick = self._get_tick(symbol)
+        if not tick:
+            return {'success': False, 'message': f'Failed to get tick for {symbol}'}
+
+        price = float(getattr(tick, 'ask', 0) or 0)
+        request = {
+            'action': mt5.TRADE_ACTION_DEAL,
+            'symbol': resolved,
+            'volume': float(volume),
+            'type': mt5.ORDER_TYPE_BUY,
+            'price': price,
+            'deviation': deviation,
+            'type_time': getattr(mt5, 'ORDER_TIME_GTC', 0),
+            'comment': comment,
+        }
+        fill = self.resolve_filling_mode(resolved, request)
+        if fill is not None:
+            request['type_filling'] = fill
+        if magic is not None:
+            request['magic'] = int(magic)
+        try:
+            result = mt5.order_send(request)
+            retcode = getattr(result, 'retcode', None)
+            success = retcode == getattr(mt5, 'TRADE_RETCODE_DONE', 10009)
+            if success:
+                return {
+                    'success': True,
+                    'retcode': retcode,
+                    'message': str(result),
+                    'order': getattr(result, 'order', None),
+                    'deal': getattr(result, 'deal', None),
+                    'filling_used': fill,
+                }
+            # Fallback: try other filling modes if initial send failed
+            fb = self._order_send_with_filling(request, resolved)
+            if 'filling_used' not in fb and fill is not None:
+                fb['filling_used'] = fill
+            return fb
+        except Exception as e:
+            return {'success': False, 'message': f'BUY error: {str(e)}', 'filling_used': fill}
+
+    def market_sell(self, symbol: str, volume: float, deviation: int = 20, comment: str = 'GCE3 SELL', magic: Optional[int] = None) -> Dict[str, Any]:
+        if not self.is_connected:
+            return {'success': False, 'message': 'Not connected to MT5'}
+        if not symbol:
+            return {'success': False, 'message': 'Symbol is required'}
+        try:
+            if volume is None or float(volume) <= 0:
+                return {'success': False, 'message': 'Volume must be > 0'}
+        except Exception:
+            return {'success': False, 'message': 'Invalid volume'}
+        resolved = self._resolve_trade_symbol(symbol)
+        if not resolved:
+            return {'success': False, 'message': f'Symbol not available: {symbol}'}
+        tick = self._get_tick(symbol)
+        if not tick:
+            return {'success': False, 'message': f'Failed to get tick for {symbol}'}
+
+        price = float(getattr(tick, 'bid', 0) or 0)
+        request = {
+            'action': mt5.TRADE_ACTION_DEAL,
+            'symbol': resolved,
+            'volume': float(volume),
+            'type': mt5.ORDER_TYPE_SELL,
+            'price': price,
+            'deviation': deviation,
+            'comment': comment,
+        }
+        request['type_time'] = getattr(mt5, 'ORDER_TIME_GTC', 0)
+        fill = self.resolve_filling_mode(resolved, request)
+        if fill is not None:
+            request['type_filling'] = fill
+        if magic is not None:
+            request['magic'] = int(magic)
+        try:
+            result = mt5.order_send(request)
+            retcode = getattr(result, 'retcode', None)
+            success = retcode == getattr(mt5, 'TRADE_RETCODE_DONE', 10009)
+            if success:
+                return {
+                    'success': True,
+                    'retcode': retcode,
+                    'message': str(result),
+                    'order': getattr(result, 'order', None),
+                    'deal': getattr(result, 'deal', None),
+                    'filling_used': fill,
+                }
+            fb = self._order_send_with_filling(request, resolved)
+            if 'filling_used' not in fb and fill is not None:
+                fb['filling_used'] = fill
+            return fb
+        except Exception as e:
+            return {'success': False, 'message': f'SELL error: {str(e)}', 'filling_used': fill}
+
+    def close_position(self, ticket: int, deviation: int = 20, comment: str = 'GCE3 CLOSE') -> Dict[str, Any]:
+        if not self.is_connected:
+            return {'success': False, 'message': 'Not connected to MT5'}
+        try:
+            pos = None
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+            if not pos:
+                return {'success': False, 'message': f'Position not found: {ticket}'}
+            symbol = getattr(pos, 'symbol', '')
+            if not self._ensure_symbol(symbol):
+                return {'success': False, 'message': f'Symbol not available: {symbol}'}
+            tick = self._get_tick(symbol)
+            if not tick:
+                return {'success': False, 'message': f'Failed to get tick for {symbol}'}
+
+            pos_type = int(getattr(pos, 'type', 0) or 0)
+            vol = float(getattr(pos, 'volume', 0) or 0)
+            pos_type_buy = getattr(mt5, 'POSITION_TYPE_BUY', 0)
+            # opposite order type and correct price
+            if pos_type == pos_type_buy:
+                close_type = mt5.ORDER_TYPE_SELL
+                price = float(getattr(tick, 'bid', 0) or 0)
+            else:
+                close_type = mt5.ORDER_TYPE_BUY
+                price = float(getattr(tick, 'ask', 0) or 0)
+
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'position': int(ticket),
+                'symbol': symbol,
+                'volume': vol,
+                'type': close_type,
+                'price': price,
+                'deviation': deviation,
+                'type_time': getattr(mt5, 'ORDER_TIME_GTC', 0),
+                'comment': comment,
+            }
+            fill = self.resolve_filling_mode(symbol, request)
+            if fill is not None:
+                request['type_filling'] = fill
+            try:
+                result = mt5.order_send(request)
+                retcode = getattr(result, 'retcode', None)
+                success = retcode == getattr(mt5, 'TRADE_RETCODE_DONE', 10009)
+                return {
+                    'success': success,
+                    'retcode': retcode,
+                    'message': str(result),
+                    'order': getattr(result, 'order', None),
+                    'deal': getattr(result, 'deal', None),
+                    'filling_used': fill,
+                }
+            except Exception as e:
+                return {'success': False, 'message': f'Close error: {str(e)}', 'filling_used': fill}
+        except Exception as e:
+            return {'success': False, 'message': f'Close error: {str(e)}'}
+
+    def close_all(self, only_type: Optional[str] = None) -> Dict[str, Any]:
+        if not self.is_connected:
+            return {'success': False, 'message': 'Not connected to MT5'}
+        try:
+            positions = self.get_open_positions() or []
+            closed = 0
+            errors: List[Dict[str, Any]] = []
+            for p in positions:
+                if only_type and p.get('type') != only_type:
+                    continue
+                res = self.close_position(p.get('ticket'))
+                if res.get('success'):
+                    closed += 1
+                else:
+                    errors.append({'ticket': p.get('ticket'), 'error': res.get('message')})
+            return {'success': True, 'closed': closed, 'errors': errors}
+        except Exception as e:
+            return {'success': False, 'message': f'Close all error: {str(e)}'}
 
 
 class MT5Manager:

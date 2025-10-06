@@ -1,0 +1,94 @@
+{% extends 'main/base.html' %}
+
+{% block title %}Trading History (MetaTrader) - Project GCE 3{% endblock %}
+
+{% block content %}
+{% include 'main/_th_tabs.html' %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">MetaTrader Deals</h2>
+    <p class="card-subtitle">Loaded directly from MT5 connection</p>
+  </div>
+
+  <form method="get" style="background:#f8f9fa; padding:1rem; border-radius:8px; margin:1rem 0;">
+    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem;">
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Connection</label>
+        <select name="conn" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;">
+          {% for c in connections %}
+            <option value="{{ c.id }}" {% if selected_conn and selected_conn.id == c.id %}selected{% endif %}>{{ c.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">System (by magic)</label>
+        <select name="sys" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;">
+          <option value="">All</option>
+          {% for s in systems_magic %}
+            <option value="{{ s.id }}" {% if selected_system_magic and selected_system_magic.id == s.id %}selected{% endif %}>{{ s.system_sid }} ({{ s.magic_number }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Days</label>
+        <input type="number" name="days" value="{{ days }}" min="1" step="1" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;" />
+      </div>
+      <div style="display:flex; align-items:end;"><button class="btn btn-primary" style="width:100%;">Load</button></div>
+    </div>
+  </form>
+
+  {% if error %}
+    <div class="alert alert-warning">Error: {{ error }}</div>
+  {% endif %}
+
+  {% if connected_login %}
+  <div class="card" style="margin:0 0 1rem 0;">
+    <div class="card-body" style="padding:0.75rem 1rem; color:#6c757d;">
+      Connected login: <strong>{{ connected_login }}</strong>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="dashboard-grid">
+    <div class="metric-card"><div class="metric-value">{{ summary.trades|default:"0" }}</div><div class="metric-label">Total Deals</div></div>
+    <div class="metric-card"><div class="metric-value">{{ summary.profit|floatformat:2 }}</div><div class="metric-label">Total Profit</div></div>
+  </div>
+
+  <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:hidden;">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th>Time</th>
+          <th>Symbol</th>
+          <th>Direction</th>
+          <th>Volume</th>
+          <th>Price</th>
+          <th>Profit</th>
+          <th>Ticket</th>
+          <th>Magic</th>
+          <th>Comment</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if deals %}
+          {% for d in deals %}
+          <tr>
+            <td>{{ d.time|date:"Y-m-d H:i:s" }}</td>
+            <td>{{ d.symbol }}</td>
+            <td>{{ d.direction }}</td>
+            <td>{{ d.volume|floatformat:2 }}</td>
+            <td>{{ d.price|floatformat:5 }}</td>
+            <td>{{ d.profit|floatformat:2 }}</td>
+            <td>{{ d.ticket }}</td>
+            <td>{% if d.magic is not None %}{{ d.magic }}{% else %}-{% endif %}</td>
+            <td>{{ d.comment }}</td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="8" style="text-align:center; color:#6c757d; padding:2rem;">No deals found</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

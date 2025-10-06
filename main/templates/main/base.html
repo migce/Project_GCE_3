@@ -21,7 +21,12 @@
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a href="{% url 'main:trading_history' %}" class="nav-link {% if request.resolver_match.url_name == 'trading_history' %}active{% endif %}">
+                        <a href="{% url 'main:trading_positions' %}" class="nav-link {% if request.resolver_match.url_name == 'trading_positions' %}active{% endif %}">
+                            📊 Trading
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{% url 'main:trading_history' %}" class="nav-link {% if request.resolver_match.url_name == 'trading_history' or request.resolver_match.url_name == 'trading_history_ts' or request.resolver_match.url_name == 'trading_history_mt5' %}active{% endif %}">
                             📈 Trading History
                         </a>
                     </li>
@@ -153,3 +158,4 @@
     </script>
 </body>
 </html>
+

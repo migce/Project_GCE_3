@@ -1,0 +1,179 @@
+{% extends 'main/base.html' %}
+
+{% block title %}Trading — Open Positions{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Trading - Open Positions</h2>
+    <p class="card-subtitle">Live positions from MetaTrader 5 (default connection)</p>
+  </div>
+
+  {% include 'main/_trading_tabs.html' %}
+
+  <div class="card" style="margin: 1rem 0;">
+    <div class="card-header">
+      <h3 class="card-title">Manual Trading</h3>
+      <p class="card-subtitle">Place market orders and manage positions</p>
+    </div>
+    <div style="padding: 1rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; align-items: end;">
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Symbol</label>
+        <input id="tradeSymbol" type="text" value="{% if positions and positions.0.symbol %}{{ positions.0.symbol }}{% else %}EURUSD{% endif %}" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;" />
+      </div>
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Volume (lots)</label>
+        <input id="tradeVolume" type="number" step="0.01" min="0.01" value="0.01" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;" />
+      </div>
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button id="btnBuy" class="btn btn-success">BUY</button>
+        <button id="btnSell" class="btn btn-danger">SELL</button>
+      </div>
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button id="btnCloseAllBuy" class="btn btn-secondary">Close All BUY</button>
+        <button id="btnCloseAllSell" class="btn btn-secondary">Close All SELL</button>
+      </div>
+    </div>
+    <div id="tradeStatus" style="padding: 0 1rem 1rem; color: #6c757d;"></div>
+  </div>
+
+  {% if error %}
+    <div class="alert alert-error" style="margin: 1rem;">{{ error }}</div>
+  {% endif %}
+
+  {% if account %}
+  <div class="dashboard-grid" style="margin-top: 0.5rem;">
+    <div class="metric-card"><div class="metric-value">{{ account.login }}</div><div class="metric-label">Login</div></div>
+    <div class="metric-card"><div class="metric-value">{{ account.server }}</div><div class="metric-label">Server</div></div>
+    <div class="metric-card"><div class="metric-value">{{ account.currency }}</div><div class="metric-label">Currency</div></div>
+    <div class="metric-card"><div class="metric-value">${{ account.balance|floatformat:2 }}</div><div class="metric-label">Balance</div></div>
+    <div class="metric-card"><div class="metric-value">${{ account.equity|floatformat:2 }}</div><div class="metric-label">Equity</div></div>
+  </div>
+  {% endif %}
+
+  <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:auto; margin-top:1rem;">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th>Ticket</th>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th>Volume</th>
+          <th>Open Price</th>
+          <th>SL</th>
+          <th>TP</th>
+          <th>Current</th>
+          <th>Profit</th>
+          <th>Open Time</th>
+          <th>Comment</th>
+          <th>Magic</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if positions %}
+          {% for p in positions %}
+          <tr>
+            <td>{{ p.ticket }}</td>
+            <td>{{ p.symbol }}</td>
+            <td>{{ p.type }}</td>
+            <td>{{ p.volume|floatformat:2 }}</td>
+            <td>{{ p.price_open|floatformat:5 }}</td>
+            <td>{{ p.sl|floatformat:5 }}</td>
+            <td>{{ p.tp|floatformat:5 }}</td>
+            <td>{{ p.price_current|floatformat:5 }}</td>
+            <td>{% if p.profit %}${{ p.profit|floatformat:2 }}{% else %}-{% endif %}</td>
+            <td>{% if p.time %}{{ p.time|date:"Y-m-d H:i:s" }}{% else %}-{% endif %}</td>
+            <td>{{ p.comment }}</td>
+            <td>{{ p.magic }}</td>
+            <td><button class="btn btn-danger btn-sm btn-close-position" data-ticket="{{ p.ticket }}">Close</button></td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="12" style="text-align:center; color:#6c757d; padding:2rem;">No open positions</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<script>
+  function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+  }
+  const csrftoken = getCookie('csrftoken');
+
+  function setStatus(msg, isError=false) {
+    const el = document.getElementById('tradeStatus');
+    el.style.color = isError ? '#dc3545' : '#6c757d';
+    el.textContent = msg;
+  }
+
+  async function post(url, data) {
+    const formData = new URLSearchParams();
+    Object.entries(data||{}).forEach(([k,v]) => formData.append(k, v));
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrftoken },
+      body: formData
+    });
+    return res.json();
+  }
+
+  document.getElementById('btnBuy').addEventListener('click', async () => {
+    const symbol = document.getElementById('tradeSymbol').value.trim();
+    const volStr = (document.getElementById('tradeVolume').value || '0.01').replace(',', '.');
+    const volume = parseFloat(volStr);
+    setStatus('Sending BUY order...');
+    const r = await post('{% url "main:mt5_trade_buy" %}', { symbol, volume });
+    if (r.success) {
+      setStatus('BUY ok' + (r.filling_used !== undefined ? ' (filling=' + r.filling_used + ')' : ''));
+      location.reload();
+    } else {
+      setStatus((r.message || 'BUY failed') + (r.filling_used !== undefined ? ' (filling=' + r.filling_used + ')' : ''), true);
+    }
+  });
+
+  document.getElementById('btnSell').addEventListener('click', async () => {
+    const symbol = document.getElementById('tradeSymbol').value.trim();
+    const volStr = (document.getElementById('tradeVolume').value || '0.01').replace(',', '.');
+    const volume = parseFloat(volStr);
+    setStatus('Sending SELL order...');
+    const r = await post('{% url "main:mt5_trade_sell" %}', { symbol, volume });
+    if (r.success) {
+      setStatus('SELL ok' + (r.filling_used !== undefined ? ' (filling=' + r.filling_used + ')' : ''));
+      location.reload();
+    } else {
+      setStatus((r.message || 'SELL failed') + (r.filling_used !== undefined ? ' (filling=' + r.filling_used + ')' : ''), true);
+    }
+  });
+
+  document.getElementById('btnCloseAllBuy').addEventListener('click', async () => {
+    setStatus('Closing all BUY positions...');
+    const r = await post('{% url "main:mt5_close_all" %}', { side: 'BUY' });
+    if (r.success) { setStatus(`Closed: ${r.closed||0}`); location.reload(); } else { setStatus(r.message || 'Close all BUY failed', true); }
+  });
+
+  document.getElementById('btnCloseAllSell').addEventListener('click', async () => {
+    setStatus('Closing all SELL positions...');
+    const r = await post('{% url "main:mt5_close_all" %}', { side: 'SELL' });
+    if (r.success) { setStatus(`Closed: ${r.closed||0}`); location.reload(); } else { setStatus(r.message || 'Close all SELL failed', true); }
+  });
+
+  document.querySelectorAll('.btn-close-position').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const ticket = btn.getAttribute('data-ticket');
+      setStatus(`Closing position ${ticket}...`);
+      const r = await post('{% url "main:mt5_close_position" %}', { ticket });
+      if (r.success) {
+        setStatus('Position closed' + (r.filling_used !== undefined ? ' (filling=' + r.filling_used + ')' : ''));
+        location.reload();
+      } else {
+        setStatus((r.message || 'Close failed') + (r.filling_used !== undefined ? ' (filling=' + r.filling_used + ')' : ''), true);
+      }
+    });
+  });
+</script>
+{% endblock %}
+

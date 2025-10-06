@@ -16,10 +16,10 @@ class MT5ConnectionSettings(models.Model):
     
     # Настройки терминала
     terminal_path = models.CharField(
-        # max_length=500,
+        max_length=500,
         verbose_name="Путь к терминалу MT5",
         help_text="Полный путь к исполняемому файлу terminal64.exe",
-        # blank=True,
+        blank=True,
         null=True
     )
     
@@ -382,9 +382,29 @@ class TradingSystem(models.Model):
     # Валютная пара
     symbol = models.CharField(
         max_length=20,
-        verbose_name="Валютная пара",
-        help_text="Торговая пара (например: EURUSD, GBPUSD)",
         default="EURUSD"
+    )
+
+    # System trading controls
+    trading_enabled = models.BooleanField(
+        default=False,
+        verbose_name='Allow Trading',
+        help_text='If enabled, signals may execute real trades for this system'
+    )
+    lot_size = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.01,
+        verbose_name='Lot Size',
+        help_text='Default lot size to use for trades (e.g., 0.01)'
+    )
+
+    # MT5 magic number mapping for this system (optional)
+    magic_number = models.IntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Magic Number',
+        help_text='MT5 Expert Advisor magic number for mapping/filtering'
     )
     
     # Количество уровней таймфреймов
@@ -762,6 +782,11 @@ class SignalEvent(models.Model):
     timeframe = models.ForeignKey(TimeFrame, on_delete=models.CASCADE, related_name='signals', verbose_name='Timeframe')
     bar = models.ForeignKey(Bar, on_delete=models.SET_NULL, null=True, blank=True, related_name='signals', verbose_name='Bar')
     direction = models.CharField(max_length=8, choices=DIRECTION_CHOICES)
+    action = models.CharField(
+        max_length=8,
+        choices=[('OPEN', 'OPEN'), ('CLOSE', 'CLOSE')],
+        default='OPEN'
+    )
     rule_text = models.TextField(blank=True)
     event_time = models.DateTimeField(verbose_name='Event Time')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -771,11 +796,24 @@ class SignalEvent(models.Model):
         indexes = [
             models.Index(fields=['trading_system', 'timeframe', '-event_time']),
             models.Index(fields=['bar', 'direction']),
+            models.Index(fields=['direction', 'action', '-event_time']),
         ]
-        unique_together = [('trading_system', 'timeframe', 'event_time', 'direction')]
+        unique_together = [('trading_system', 'timeframe', 'event_time', 'direction', 'action')]
 
     def __str__(self):
-        return f"{self.trading_system.system_sid}:{self.timeframe.timeframe} {self.direction} @ {self.event_time:%Y-%m-%d %H:%M:%S}"
+        return f"{self.trading_system.system_sid}:{self.timeframe.timeframe} {self.direction}/{self.action} @ {self.event_time:%Y-%m-%d %H:%M:%S}"
+
+
+class SignalExecutionLog(models.Model):
+    signal = models.OneToOneField(SignalEvent, on_delete=models.CASCADE, related_name='execution')
+    executed_at = models.DateTimeField(auto_now_add=True)
+    success = models.BooleanField(default=False)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['-executed_at']),
+        ]
 
 class DataIngestionStatus(models.Model):
     """Singleton-like model to track data ingestion worker status and KPIs."""

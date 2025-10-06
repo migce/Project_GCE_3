@@ -1,0 +1,4 @@
+<div style="margin-bottom: 1rem;">
+  <a href="{% url 'main:trading_history_ts' %}" class="btn {% if request.resolver_match.url_name in 'trading_history trading_history_ts' %}btn-primary{% else %}btn-secondary{% endif %}" style="margin-right:0.5rem;">TradeStation</a>
+  <a href="{% url 'main:trading_history_mt5' %}" class="btn {% if request.resolver_match.url_name == 'trading_history_mt5' %}btn-primary{% else %}btn-secondary{% endif %}">MetaTrader</a>
+</div>

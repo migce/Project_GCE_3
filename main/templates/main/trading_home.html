@@ -1,0 +1,20 @@
+{% extends 'main/base.html' %}
+
+{% block title %}Trading - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Trading</h2>
+    <p class="card-subtitle">Choose a trading module</p>
+  </div>
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap:1.25rem; padding:1.25rem;">
+    <a class="btn btn-primary" href="{% url 'main:trading_history_ts' %}">TradeStation — Signals/History</a>
+    <a class="btn btn-primary" href="{% url 'main:trading_history_mt5' %}">MetaTrader — Deals</a>
+  </div>
+  <div style="padding:0 1.25rem 1.25rem; color:#6c757d;">
+    Systems configured: <strong>{{ systems_count }}</strong>
+  </div>
+  </div>
+{% endblock %}
+

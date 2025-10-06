@@ -54,8 +54,8 @@ class Or:
 @dataclass
 class Rule:
     condition: Any
-    action_then: str  # BUY/SELL/NONE
-    action_else: Optional[str] = None
+    action_then: List[str]  # list of actions
+    action_else: Optional[List[str]] = None
 
 
 class ParseError(Exception):
@@ -105,8 +105,16 @@ class Lexer:
 
 
 def parse_rules(text: str) -> List[Rule]:
-    # Split by lines with non-empty content
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    """Parse multi-line rules. Supports full-line comments starting with #.
+
+    A line is ignored if, after trimming whitespace, it is empty or starts with '#'.
+    """
+    lines: List[str] = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or s.startswith('#'):
+            continue
+        lines.append(s)
     return [parse_rule(line) for line in lines]
 
 
@@ -119,20 +127,54 @@ def parse_rule(line: str) -> Rule:
     lx._skip_ws()
     if not lx.take('THEN'):
         raise ParseError('Expected THEN')
-    action_then = parse_action(lx)
+    action_then = parse_action_list(lx)
     lx._skip_ws()
     action_else = None
     if lx.take('ELSE'):
-        action_else = parse_action(lx)
+        action_else = parse_action_list(lx)
     return Rule(cond, action_then, action_else)
 
 
 def parse_action(lx: Lexer) -> str:
     lx._skip_ws()
-    for act in ('BUY', 'SELL', 'NONE'):
+    for act in (
+        'BUY', 'SELL', 'NONE',
+        'CLOSE_LONG', 'CLOSE_SHORT',
+        'CLOSE_BUY', 'CLOSE_SELL',
+        'EXIT_LONG', 'EXIT_SHORT',
+    ):
         if lx.take(act):
             return act
     raise ParseError('Unknown action (expected BUY/SELL/NONE)')
+
+
+def parse_action_list(lx: Lexer) -> List[str]:
+    """Parse one or more actions.
+
+    Supports either a single action token or a block in braces with separators:
+    THEN { CLOSE_SHORT; BUY } or THEN { CLOSE_SHORT, BUY } or THEN { CLOSE_SHORT + BUY }
+    """
+    lx._skip_ws()
+    actions: List[str] = []
+    if lx._peek() == '{':
+        lx._advance(1)
+        while True:
+            lx._skip_ws()
+            actions.append(parse_action(lx))
+            lx._skip_ws()
+            ch = lx._peek()
+            if ch == '}':
+                lx._advance(1)
+                break
+            if ch in ',;':
+                lx._advance(1)
+                continue
+            if lx.take('+'):
+                continue
+            raise ParseError('Expected , ; + or } in action list')
+    else:
+        actions.append(parse_action(lx))
+    return actions
 
 
 def parse_expr(lx: Lexer):
@@ -422,14 +464,28 @@ def generate_signals_for_system(system: TradingSystem, limit_bars: int = 500) ->
 
         for r in rules:
             ok = bool(_eval(r.condition, env_get))
-            action = r.action_then if ok else (r.action_else or 'NONE')
-            if action in ('BUY', 'SELL'):
-                events.append(SignalEvent(
-                    trading_system=system,
-                    timeframe=base_tf,
-                    bar=b,
-                    direction=action,
-                    rule_text=str(r),
-                    event_time=b.dt_server or b.dt,
-                ))
+            actions = r.action_then if ok else (r.action_else or [])
+            for action in actions:
+                if action in ('BUY', 'SELL', 'CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE_BUY', 'CLOSE_SELL', 'EXIT_LONG', 'EXIT_SHORT'):
+                    # Map action to direction + open/close
+                    if action in ('BUY', 'SELL'):
+                        direction = action
+                        act_kind = 'OPEN'
+                    elif action in ('CLOSE_LONG', 'CLOSE_BUY', 'EXIT_LONG'):
+                        direction = 'BUY'
+                        act_kind = 'CLOSE'
+                    elif action in ('CLOSE_SHORT', 'CLOSE_SELL', 'EXIT_SHORT'):
+                        direction = 'SELL'
+                        act_kind = 'CLOSE'
+                    else:
+                        continue
+                    events.append(SignalEvent(
+                        trading_system=system,
+                        timeframe=base_tf,
+                        bar=b,
+                        direction=direction,
+                        rule_text=str(r),
+                        event_time=b.dt_server or b.dt,
+                        action=act_kind,
+                    ))
     return events

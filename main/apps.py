@@ -104,5 +104,14 @@ class MainConfig(AppConfig):
                         logger.info('MT5 Monitoring Service autostarted')
                 except Exception as e:
                     logger.warning(f'MT5 Monitoring autostart failed: {e}')
+
+            # Start System Trader (auto)
+            if getattr(django_settings, 'AUTOSTART_SYSTEM_TRADER', True):
+                try:
+                    from .services.system_trader import start_trader
+                    start_trader()
+                    logger.info('System Trader autostarted')
+                except Exception as e:
+                    logger.warning(f'System Trader autostart failed: {e}')
         except Exception as outer:
             logger.debug(f"Autostart thread error: {outer}")

@@ -1,0 +1,170 @@
+{% extends 'main/base.html' %}
+
+{% block title %}System Trading - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">System Trading</h2>
+    <p class="card-subtitle">Enable trading and set default lot size per system</p>
+  </div>
+
+  {% include 'main/_trading_tabs.html' %}
+
+  <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:hidden;">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th style="width:14%;">System</th>
+          <th style="width:24%;">Name</th>
+          <th style="width:10%;">Symbol</th>
+          <th style="width:12%;">Magic</th>
+          <th style="width:14%;">Allow Trading</th>
+          <th style="width:12%;">Lot Size</th>
+          <th style="width:14%;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in systems %}
+        <tr data-id="{{ s.id }}">
+          <td>{{ s.system_sid }}</td>
+          <td>{{ s.name }}</td>
+          <td>{{ s.symbol }}</td>
+          <td>{% if s.magic_number %}{{ s.magic_number }}{% else %}-{% endif %}</td>
+          <td>
+            <label style="display:flex; align-items:center; gap:0.5rem;">
+              <input type="checkbox" class="st-enabled" {% if s.trading_enabled %}checked{% endif %} />
+              <span>{% if s.trading_enabled %}Enabled{% else %}Disabled{% endif %}</span>
+            </label>
+          </td>
+          <td>
+            <input type="number" class="st-lot" step="0.01" min="0.01" value="{{ s.lot_size|floatformat:2 }}" style="width:100%; padding:0.35rem; border:1px solid #ddd; border-radius:4px;" />
+          </td>
+          <td>
+            <button class="btn btn-primary btn-st-save">Save</button>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center; color:#6c757d; padding:2rem;">No systems</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div id="stStatus" style="margin:0.75rem 0; color:#6c757d;"></div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h3 class="card-title">Positions & Deals</h3>
+    <p class="card-subtitle">View open positions and recent deals for a system</p>
+  </div>
+  <div class="card-body">
+    <form id="stQuery" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem; margin-bottom:1rem;">
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">System</label>
+        <select id="stSystem" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;">
+          {% for s in systems %}
+            <option value="{{ s.id }}">{{ s.system_sid }} ({{ s.symbol }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Days</label>
+        <input id="stDays" type="number" value="7" min="1" step="1" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;" />
+      </div>
+      <div style="display:flex; align-items:end;"><button id="btnLoadSt" type="button" class="btn btn-primary" style="width:100%;">Load</button></div>
+    </form>
+
+    <h4 style="margin:0.5rem 0;">Open Positions</h4>
+    <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:auto;">
+      <table class="table" id="tblOpen">
+        <thead><tr><th>Ticket</th><th>Symbol</th><th>Type</th><th>Volume</th><th>Open</th><th>Current</th><th>Profit</th><th>Time</th></tr></thead>
+        <tbody><tr><td colspan="8" style="text-align:center; color:#6c757d; padding:1rem;">No data</td></tr></tbody>
+      </table>
+    </div>
+
+    <h4 style="margin:1rem 0 0.5rem;">Recent Deals</h4>
+    <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:auto;">
+      <table class="table" id="tblDeals">
+        <thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Volume</th><th>Price</th><th>Profit</th><th>Ticket</th></tr></thead>
+        <tbody><tr><td colspan="7" style="text-align:center; color:#6c757d; padding:1rem;">No data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  async function fetchJSON(url){ const r = await fetch(url); return r.json(); }
+  function fillTable(bodyEl, rows, cols){
+    bodyEl.innerHTML = '';
+    if(!rows || !rows.length){ bodyEl.innerHTML = `<tr><td colspan="${cols}" style="text-align:center; color:#6c757d; padding:1rem;">No data</td></tr>`; return; }
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = r.join('');
+      bodyEl.appendChild(tr);
+    });
+  }
+  async function loadSystemData(){
+    const id = document.getElementById('stSystem').value;
+    const days = document.getElementById('stDays').value || '7';
+    const pos = await fetchJSON(`{% url 'main:api_system_positions' %}?id=${id}`);
+    const deals = await fetchJSON(`{% url 'main:api_system_deals' %}?id=${id}&days=${days}`);
+    const pbody = document.querySelector('#tblOpen tbody');
+    const dbody = document.querySelector('#tblDeals tbody');
+    const posRows = (pos.positions||[]).map(p => [
+      `<td>${p.ticket||''}</td>`,
+      `<td>${p.symbol||''}</td>`,
+      `<td>${p.type||''}</td>`,
+      `<td>${(p.volume||0).toFixed(2)}</td>`,
+      `<td>${(p.price_open||0).toFixed(5)}</td>`,
+      `<td>${(p.price_current||0).toFixed(5)}</td>`,
+      `<td>${p.profit!==undefined? p.profit.toFixed(2): '-'}</td>`,
+      `<td>${p.time? new Date(p.time).toLocaleString(): '-'}</td>`
+    ]);
+    fillTable(pbody, posRows, 8);
+    const dealRows = (deals.deals||[]).map(d => [
+      `<td>${d.time}</td>`, `<td>${d.symbol}</td>`, `<td>${d.direction}</td>`,
+      `<td>${(d.volume||0).toFixed(2)}</td>`, `<td>${(d.price||0).toFixed(5)}</td>`,
+      `<td>${(d.profit||0).toFixed(2)}</td>`, `<td>${d.ticket||''}</td>`
+    ]);
+    fillTable(dbody, dealRows, 7);
+  }
+  document.getElementById('btnLoadSt').addEventListener('click', loadSystemData);
+  document.addEventListener('DOMContentLoaded', loadSystemData);
+</script>
+<script>
+  function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+  }
+  const csrftoken = getCookie('csrftoken');
+  function setStatus(msg, isError=false) {
+    const el = document.getElementById('stStatus');
+    el.style.color = isError ? '#dc3545' : '#6c757d';
+    el.textContent = msg;
+  }
+  async function post(url, data) {
+    const formData = new URLSearchParams();
+    Object.entries(data||{}).forEach(([k,v]) => formData.append(k, v));
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrftoken },
+      body: formData
+    });
+    return res.json();
+  }
+  document.querySelectorAll('.btn-st-save').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      const id = tr.getAttribute('data-id');
+      const enabled = tr.querySelector('.st-enabled').checked ? '1' : '0';
+      const lotStr = (tr.querySelector('.st-lot').value || '0.01').replace(',', '.');
+      setStatus('Saving...');
+      const r = await post('{% url "main:api_system_trading_update" %}', { id, enabled, lot: lotStr });
+      if (r.success) setStatus('Saved'); else setStatus(r.message || 'Error', true);
+    });
+  });
+</script>
+{% endblock %}

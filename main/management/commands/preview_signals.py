@@ -39,6 +39,7 @@ class Command(BaseCommand):
                         timeframe=ev.timeframe,
                         event_time=ev.event_time,
                         direction=ev.direction,
+                        action=getattr(ev, 'action', 'OPEN'),
                         defaults={'rule_text': ev.rule_text, 'bar': ev.bar},
                     )
                     if not created and obj.bar_id is None and ev.bar_id:
@@ -47,4 +48,4 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f'Saved {len(events)} signals (deduped by unique constraint)'))
         else:
             for ev in events[-50:]:  # print last 50
-                self.stdout.write(f"{ev.event_time:%Y-%m-%d %H:%M:%S} {ev.direction} {system.system_sid} {ev.timeframe.timeframe}")
+                self.stdout.write(f"{ev.event_time:%Y-%m-%d %H:%M:%S} {ev.direction}/{getattr(ev, 'action', 'OPEN')} {system.system_sid} {ev.timeframe.timeframe}")

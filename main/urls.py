@@ -5,7 +5,20 @@ app_name = 'main'
 
 urlpatterns = [
     path('', views.home, name='home'),
-    path('trading-history/', views.trading_history, name='trading_history'),
+    path('trading-history/', views.trading_history_ts, name='trading_history'),
+    path('trading-history/tradestation/', views.trading_history_ts, name='trading_history_ts'),
+    path('trading-history/metatrader/', views.trading_history_mt5, name='trading_history_mt5'),
+    path('trading/', views.trading_home, name='trading'),
+    path('trading/positions/', views.trading_positions, name='trading_positions'),
+    path('trading/systems/', views.system_trading, name='system_trading'),
+    path('api/system-trading/update', views.api_system_trading_update, name='api_system_trading_update'),
+    path('api/system-trading/positions', views.api_system_positions, name='api_system_positions'),
+    path('api/system-trading/deals', views.api_system_deals, name='api_system_deals'),
+    # Manual trading API
+    path('api/mt5/trade/buy', views.mt5_trade_buy, name='mt5_trade_buy'),
+    path('api/mt5/trade/sell', views.mt5_trade_sell, name='mt5_trade_sell'),
+    path('api/mt5/trade/close_all', views.mt5_close_all, name='mt5_close_all'),
+    path('api/mt5/trade/close_position', views.mt5_close_position, name='mt5_close_position'),
     path('system-dashboard/', views.system_dashboard, name='system_dashboard'),
     path('raw-signals/', views.raw_signals_overview, name='raw_signals'),
     path('api/mt5/connect/', views.connect_mt5, name='mt5_connect'),

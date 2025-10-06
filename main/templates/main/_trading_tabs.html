@@ -1,0 +1,5 @@
+<div style="margin: 0.5rem 0 1rem 0;">
+  <a href="{% url 'main:trading_positions' %}" class="btn {% if request.resolver_match.url_name == 'trading_positions' %}btn-primary{% else %}btn-secondary{% endif %}" style="margin-right:0.5rem;">Positions</a>
+  <a href="{% url 'main:system_trading' %}" class="btn {% if request.resolver_match.url_name == 'system_trading' %}btn-primary{% else %}btn-secondary{% endif %}">System Trading</a>
+</div>
+

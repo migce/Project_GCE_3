@@ -17,6 +17,7 @@ from .models import (
     IndicatorValue,
     ImportLog,
     SignalEvent,
+    SignalExecutionLog,
 )
 
 # Register your models here.
@@ -337,8 +338,8 @@ class TradingSystemAdmin(admin.ModelAdmin):
     """Админ панель для торговых систем"""
     
     list_display = [
-        'system_status_icon', 'system_sid', 'name', 'symbol', 
-        'timeframes_count', 'time_offset_minutes', 'is_active', 
+        'system_status_icon', 'system_sid', 'name', 'symbol', 'magic_number', 'magic_number', 
+        'timeframes_count', 'time_offset_minutes', 'is_active', 'trading_enabled', 'lot_size',
         'files_count', 'created_at'
     ]
     
@@ -351,7 +352,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     ]
     
     list_editable = [
-        'is_active'
+        'is_active', 'trading_enabled', 'lot_size'
     ]
     
     readonly_fields = [
@@ -363,7 +364,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
             'fields': ('system_sid', 'name', 'symbol')
         }),
         ('Конфигурация', {
-            'fields': ('timeframes_count', 'time_offset_minutes', 'data_dir', 'is_active')
+            'fields': ('timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number', 'is_active')
         }),
         ('Дополнительно', {
             'fields': ('description',),
@@ -575,6 +576,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
                             timeframe=ev.timeframe,
                             event_time=ev.event_time,
                             direction=ev.direction,
+                            action=getattr(ev, 'action', 'OPEN'),
                             defaults={'rule_text': ev.rule_text, 'bar': ev.bar},
                         )
                         if not created and obj.bar_id is None and ev.bar_id:
@@ -701,11 +703,24 @@ class IndicatorValueAdmin(admin.ModelAdmin):
 
 @admin.register(SignalEvent)
 class SignalEventAdmin(admin.ModelAdmin):
-    list_display = ['event_time', 'direction', 'trading_system', 'timeframe', 'bar']
-    list_filter = ['trading_system', 'timeframe', 'direction']
+    list_display = ['event_time', 'direction', 'action', 'trading_system', 'timeframe', 'bar']
+    list_filter = ['trading_system', 'timeframe', 'direction', 'action']
     search_fields = ['trading_system__system_sid']
     date_hierarchy = 'event_time'
     ordering = ['-event_time']
+
+
+@admin.register(SignalExecutionLog)
+class SignalExecutionLogAdmin(admin.ModelAdmin):
+    list_display = ['executed_at', 'signal', 'success', 'short_message']
+    list_filter = ['success']
+    search_fields = ['signal__trading_system__system_sid']
+    ordering = ['-executed_at']
+
+    def short_message(self, obj):
+        msg = obj.message or ''
+        return (msg[:120] + '...') if len(msg) > 120 else msg
+    short_message.short_description = 'Message'
 
 @admin.register(DataFile)
 class DataFileAdmin(admin.ModelAdmin):
@@ -826,6 +841,10 @@ class DataFileAdmin(admin.ModelAdmin):
 admin.site.site_header = "Project GCE 3 - Админ панель"
 admin.site.site_title = "Project GCE 3"
 admin.site.index_title = "Управление MT5 & Торговыми системами"
+
+
+
+
 
 
 
