@@ -55,10 +55,22 @@
         {% if trades %}
           {% for t in trades %}
           <tr>
-            <td>{{ t.open_time|date:"Y-m-d H:i:s" }}</td>
+            <td>
+              {% if t.open_id %}
+                <a href="{% url 'admin:main_signalevent_change' t.open_id %}" target="_blank">{{ t.open_time|date:"Y-m-d H:i:s" }}</a>
+              {% else %}
+                {{ t.open_time|date:"Y-m-d H:i:s" }}
+              {% endif %}
+            </td>
             <td>{{ t.open_dir }}</td>
             <td>{% if t.open_price %}{{ t.open_price|floatformat:5 }}{% else %}-{% endif %}</td>
-            <td>{{ t.close_time|date:"Y-m-d H:i:s" }}</td>
+            <td>
+              {% if t.close_id %}
+                <a href="{% url 'admin:main_signalevent_change' t.close_id %}" target="_blank">{{ t.close_time|date:"Y-m-d H:i:s" }}</a>
+              {% else %}
+                {{ t.close_time|date:"Y-m-d H:i:s" }}
+              {% endif %}
+            </td>
             <td>{% if t.close_price %}{{ t.close_price|floatformat:5 }}{% else %}-{% endif %}</td>
             <td>{% if t.pips is not None %}{{ t.pips|floatformat:1 }}{% else %}-{% endif %}</td>
           </tr>
@@ -73,4 +85,3 @@
 
 <div class="card"><div style="padding:0.75rem 1rem; color:#6c757d;">Tip: history is built from Signal Events as a reversal system.</div></div>
 {% endblock %}
-

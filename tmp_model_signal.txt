@@ -1,0 +1,201 @@
+class SignalEvent(models.Model):
+    DIRECTION_CHOICES = [
+        ('BUY', 'BUY'),
+        ('SELL', 'SELL'),
+    ]
+
+    trading_system = models.ForeignKey(TradingSystem, on_delete=models.CASCADE, related_name='signals', verbose_name='Trading System')
+    timeframe = models.ForeignKey(TimeFrame, on_delete=models.SET_NULL, null=True, blank=True, related_name='signals', verbose_name='Timeframe')
+    # Global-feed fields
+    level = models.PositiveIntegerField(default=1, verbose_name='TF Level')
+    feed = models.ForeignKey('DataFeed', on_delete=models.SET_NULL, null=True, blank=True, related_name='signal_events')
+    direction = models.CharField(max_length=8, choices=DIRECTION_CHOICES)
+    action = models.CharField(
+        max_length=8,
+        choices=[('OPEN', 'OPEN'), ('CLOSE', 'CLOSE')],
+        default='OPEN'
+    )
+    rule_text = models.TextField(blank=True)
+    event_time = models.DateTimeField(verbose_name='Event Time')
+    created_at = models.DateTimeField(auto_now_add=True)
+    ind_values = models.JSONField(null=True, blank=True, verbose_name='Indicator values')
+
+    class Meta:
+        ordering = ['-event_time']
+        indexes = [
+            models.Index(fields=['trading_system', 'level', '-event_time']),
+            models.Index(fields=['feed', '-event_time']),
+            models.Index(fields=['direction', 'action', '-event_time']),
+        ]
+        unique_together = [('trading_system', 'level', 'event_time', 'direction', 'action')]
+
+    def __str__(self):
+        lvl = getattr(self, 'level', None) or 1
+        return f"{self.trading_system.system_sid}:L{lvl} {self.direction}/{self.action} @ {self.event_time:%Y-%m-%d %H:%M:%S}"
+
+
+class SignalExecutionLog(models.Model):
+    signal = models.OneToOneField(SignalEvent, on_delete=models.CASCADE, related_name='execution')
+    executed_at = models.DateTimeField(auto_now_add=True)
+    success = models.BooleanField(default=False)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['-executed_at']),
+        ]
+
+class DataIngestionStatus(models.Model):
+    """Singleton-like model to track data ingestion worker status and KPIs."""
+
+    active = models.BooleanField(default=False)
+    scan_interval = models.PositiveIntegerField(default=5, help_text='Scan interval in seconds')
+    last_run = models.DateTimeField(null=True, blank=True)
+    files_scanned = models.PositiveIntegerField(default=0)
+    files_imported = models.PositiveIntegerField(default=0)
+    rows_imported = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Data Ingestion Status'
+        verbose_name_plural = 'Data Ingestion Status'
+
+    def __str__(self):
+        return f"Ingestion: {'ON' if self.active else 'OFF'} (interval {self.scan_interval}s)"
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+# ImportLog removed in global-only mode
+
+
+# ============================================================================
+# Global Market Data (provider-agnostic feed layer)
+# ============================================================================
+
+class Instrument(models.Model):
+    """Tradeable instrument (e.g., EURUSD)."""
+
+    symbol = models.CharField(max_length=32, unique=True)
+    name = models.CharField(max_length=128, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['symbol']
+
+    def __str__(self):
+        return self.symbol
+
+
+class TFCode(models.Model):
+    """Timeframe code (M1, M5, H1, ...)."""
+
+    code = models.CharField(max_length=10, unique=True)
+    minutes = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['minutes']
+
+    def __str__(self):
+        return self.code
+
+
+class DataFeed(models.Model):
+    """Data feed per provider × instrument × timeframe."""
+
+    provider = models.CharField(max_length=32, default='TS')
+    instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name='feeds')
+    tfcode = models.ForeignKey(TFCode, on_delete=models.CASCADE, related_name='feeds')
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = [('provider', 'instrument', 'tfcode')]
+        indexes = [
+            models.Index(fields=['provider', 'instrument']),
+            models.Index(fields=['instrument', 'tfcode']),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.instrument.symbol}@{self.tfcode.code}"
+
+
+class MarketBar(models.Model):
+    """Global market bar row."""
+
+    feed = models.ForeignKey(DataFeed, on_delete=models.CASCADE, related_name='bars')
+    dt = models.DateTimeField()
+    dt_server = models.DateTimeField(null=True, blank=True)
+    open = models.DecimalField(max_digits=16, decimal_places=6)
+    high = models.DecimalField(max_digits=16, decimal_places=6)
+    low = models.DecimalField(max_digits=16, decimal_places=6)
+    close = models.DecimalField(max_digits=16, decimal_places=6)
+    volume = models.BigIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('feed', 'dt')]
+        indexes = [
+            models.Index(fields=['feed', '-dt']),
+            models.Index(fields=['-dt']),
+        ]
+
+    def __str__(self):
+        # Display dt in project timezone to match admin list field rendering
+        try:
+            from django.utils import timezone as dj_tz
+            dt_local = dj_tz.localtime(self.dt) if dj_tz.is_aware(self.dt) else self.dt
+        except Exception:
+            dt_local = self.dt
+        return f"{self.feed} {dt_local:%Y-%m-%d %H:%M}"
+
+
+class MarketIndicatorDef(models.Model):
+    """Indicator definition scoped to a DataFeed."""
+
+    feed = models.ForeignKey(DataFeed, on_delete=models.CASCADE, related_name='indicators')
+    name = models.CharField(max_length=64)
+    dtype = models.CharField(max_length=16, default='numeric')
+    description = models.TextField(blank=True)
+
+    class Meta:
+        unique_together = [('feed', 'name')]
+        indexes = [
+            models.Index(fields=['feed', 'name']),
+        ]
+
+    def __str__(self):
+        return f"{self.feed}:{self.name}"
+
+
+class MarketIndicatorValue(models.Model):
+    """Indicator value for a MarketBar."""
+
+    bar = models.ForeignKey(MarketBar, on_delete=models.CASCADE, related_name='indicator_values')
+    indicator = models.ForeignKey(MarketIndicatorDef, on_delete=models.CASCADE, related_name='values')
+    value_int = models.IntegerField(null=True)
+
+    class Meta:
+        unique_together = [('bar', 'indicator')]
+        indexes = [
+            models.Index(fields=['indicator', 'bar']),
+        ]
+
+
+class MarketDataFile(models.Model):
+    """File tracking for global feed ingestion."""
+
+    provider = models.CharField(max_length=32, default='TS')
+    instrument = models.ForeignKey(Instrument, on_delete=models.SET_NULL, null=True, blank=True)
+    tfcode = models.ForeignKey(TFCode, on_delete=models.SET_NULL, null=True, blank=True)
+    feed = models.ForeignKey(DataFeed, on_delete=models.SET_NULL, null=True, blank=True)
+    filename = models.CharField(max_length=255)
+    file_path = models.CharField(max_length=500)
+    file_size = models.PositiveIntegerField(null=True, blank=True)
+    file_modified = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)

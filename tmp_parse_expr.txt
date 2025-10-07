@@ -1,0 +1,161 @@
+def parse_expr(lx: Lexer):
+    lx._skip_ws()
+    node = parse_term(lx)
+    lx._skip_ws()
+    while lx.take('OR'):
+        rhs = parse_term(lx)
+        node = Or(node, rhs)
+        lx._skip_ws()
+    return node
+
+
+def parse_term(lx: Lexer):
+    lx._skip_ws()
+    node = parse_factor(lx)
+    lx._skip_ws()
+    while lx.take('AND'):
+        rhs = parse_factor(lx)
+        node = And(node, rhs)
+        lx._skip_ws()
+    return node
+
+
+def parse_factor(lx: Lexer):
+    lx._skip_ws()
+    if lx.take('NOT'):
+        return Not(parse_factor(lx))
+    if lx._peek() == '(':
+        lx._advance(1)
+        node = parse_expr(lx)
+        lx._skip_ws()
+        if lx._peek() != ')':
+            raise ParseError('Expected )')
+        lx._advance(1)
+        return node
+    # function or comparison atom
+    # CHANGED(ind)
+    if lx.take('CHANGED'):
+        lx._skip_ws()
+        if lx._peek() != '(':
+            raise ParseError('Expected ( after CHANGED')
+        lx._advance(1)
+        ref = parse_value(lx)
+        lx._skip_ws()
+        if lx._peek() != ')':
+            raise ParseError('Expected ) in CHANGED()')
+        lx._advance(1)
+        return Changed(ref)
+    # prev(x[,n])
+    if lx.take('PREV'):
+        lx._skip_ws()
+        if lx._peek() != '(':
+            raise ParseError('Expected ( after PREV')
+        lx._advance(1)
+        ref = parse_value(lx)
+        lag = 1
+        lx._skip_ws()
+        if lx._peek() == ',':
+            lx._advance(1)
+            lx._skip_ws()
+            num = lx.number()
+            if num is None:
+                raise ParseError('Expected number for prev lag')
+            lag = int(num)
+        lx._skip_ws()
+        if lx._peek() != ')':
+            raise ParseError('Expected ) in prev()')
+        lx._advance(1)
+        return IndicatorRef(ref.name, ref.level, lag)
+    # comparison
+    left = parse_value(lx)
+    lx._skip_ws()
+    op = None
+    for cand in ('>=', '<=', '!=', '==', '>', '<'):
+        if lx.take(cand):
+            op = cand
+            break
+    if op is None:
+        raise ParseError('Expected comparison operator')
+    right = parse_value(lx)
+    return Compare(left, op, right)
+
+
+def parse_value(lx: Lexer):
+    lx._skip_ws()
+    # number
+    num = lx.number()
+    if num is not None:
+        return num
+    # indicator ref: NAME [Lk] [n]
+    ident = lx.ident()
+    if not ident:
+        raise ParseError('Expected value')
+    level = None
+    lag = 0
+    lx._skip_ws()
+    if lx._peek() == '[':
+        # [Lk]
+        lx._advance(1)
+        lx._skip_ws()
+        if lx.take('L'):
+            num = lx.number()
+            if num is None:
+                raise ParseError('Expected level number after L')
+            level = int(num)
+        else:
+            raise ParseError('Expected Lx in first []')
+        lx._skip_ws()
+        if lx._peek() != ']':
+            raise ParseError('Expected ]')
+        lx._advance(1)
+        lx._skip_ws()
+        # optional [n]
+        if lx._peek() == '[':
+            lx._advance(1)
+            lx._skip_ws()
+            num = lx.number()
+            if num is None:
+                raise ParseError('Expected lag number in []')
+            lag = int(num)
+            lx._skip_ws()
+            if lx._peek() != ']':
+                raise ParseError('Expected ] for lag')
+            lx._advance(1)
+    return IndicatorRef(ident, level, lag)
+
+
+# -----------------------------
+# Evaluation
+# -----------------------------
+
+@dataclass
+class SeriesCursor:
+    # Time-ordered pairs for an indicator at a given level
+    times: List[Any]
+    values: List[Optional[int]]
+    idx: int = -1  # last position with time <= current base time
+
+    def advance_to(self, t):
+        while self.idx + 1 < len(self.times) and self.times[self.idx + 1] <= t:
+            self.idx += 1
+
+    def value(self, lag: int) -> Optional[int]:
+        i = self.idx - lag
+        if i < 0 or i >= len(self.values):
+            return None
+        return self.values[i]
+
+
+def _collect_requirements(rules: List[Rule]) -> Set[Tuple[str, Optional[int]]]:
+    req: Set[Tuple[str, Optional[int]]] = set()
+
+    def visit(node):
+        if isinstance(node, IndicatorRef):
+            req.add((node.name, node.level))
+        elif isinstance(node, (And, Or)):
+            visit(node.left); visit(node.right)
+        elif isinstance(node, Not):
+            visit(node.expr)
+        elif isinstance(node, Compare):
+            visit(node.left); visit(node.right)
+

@@ -1,0 +1,41 @@
+{% load i18n static admin_urls %}
+<nav class="sticky">
+  <div class="app-config module current-app">
+    <h2>Configuration</h2>
+    <ul class="model-list">
+      <li class="model"><a href="{% url 'admin:main_mt5connectionsettings_changelist' %}">Настройки MT5</a></li>
+      <li class="model"><a href="{% url 'admin:main_marketdatafile_changelist' %}">Market data files</a></li>
+    </ul>
+  </div>
+
+  <div class="app-market module">
+    <h2>Market data</h2>
+    <ul class="model-list">
+      <li class="model"><a href="{% url 'admin:main_marketbar_changelist' %}">Market bars</a></li>
+      <li class="model"><a href="{% url 'admin:main_marketindicatordef_changelist' %}">Market indicator defs</a></li>
+      <li class="model"><a href="{% url 'admin:main_marketindicatorvalue_changelist' %}">Market indicator values</a></li>
+      <li class="model"><a href="{% url 'admin:main_datafeed_changelist' %}">Data feeds</a></li>
+      <li class="model"><a href="{% url 'admin:main_instrument_changelist' %}">Instruments</a></li>
+      <li class="model"><a href="{% url 'admin:main_tfcode_changelist' %}">Tf codes</a></li>
+    </ul>
+  </div>
+
+  <div class="app-trading module">
+    <h2>Trading systems</h2>
+    <ul class="model-list">
+      <li class="model"><a href="{% url 'admin:main_tradingsystem_changelist' %}">Торговые системы</a></li>
+      <li class="model"><a href="{% url 'admin:main_timeframe_changelist' %}">Таймфреймы</a></li>
+      <li class="model"><a href="{% url 'admin:main_signalevent_changelist' %}">Signal events</a></li>
+      <li class="model"><a href="{% url 'admin:main_signalexecutionlog_changelist' %}">Signal execution logs</a></li>
+    </ul>
+  </div>
+
+  <div class="app-monitoring module">
+    <h2>Monitoring</h2>
+    <ul class="model-list">
+      <li class="model"><a href="{% url 'admin:main_mt5monitoringsettings_changelist' %}">MT5 Monitoring Settings</a></li>
+      <li class="model"><a href="{% url 'admin:main_mt5connectionhealth_changelist' %}">MT5 Connection Health Records</a></li>
+      <li class="model"><a href="{% url 'admin:main_mt5connectionlog_changelist' %}">MT5 Connection Logs</a></li>
+    </ul>
+  </div>
+</nav>

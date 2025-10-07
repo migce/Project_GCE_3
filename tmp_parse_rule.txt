@@ -1,0 +1,141 @@
+def parse_rule(line: str) -> Rule:
+    lx = Lexer(line)
+    lx._skip_ws()
+    if not lx.take('IF'):
+        raise ParseError('Rule must start with IF')
+    cond = parse_expr(lx)
+    lx._skip_ws()
+    if not lx.take('THEN'):
+        raise ParseError('Expected THEN')
+    action_then = parse_action_list(lx)
+    lx._skip_ws()
+    action_else = None
+    if lx.take('ELSE'):
+        action_else = parse_action_list(lx)
+    return Rule(cond, action_then, action_else)
+
+
+def parse_action(lx: Lexer) -> str:
+    lx._skip_ws()
+    for act in (
+        'BUY', 'SELL', 'NONE',
+        'CLOSE_LONG', 'CLOSE_SHORT',
+        'CLOSE_BUY', 'CLOSE_SELL',
+        'EXIT_LONG', 'EXIT_SHORT',
+    ):
+        if lx.take(act):
+            return act
+    raise ParseError('Unknown action (expected BUY/SELL/NONE)')
+
+
+def parse_action_list(lx: Lexer) -> List[str]:
+    """Parse one or more actions.
+
+    Supports either a single action token or a block in braces with separators:
+    THEN { CLOSE_SHORT; BUY } or THEN { CLOSE_SHORT, BUY } or THEN { CLOSE_SHORT + BUY }
+    """
+    lx._skip_ws()
+    actions: List[str] = []
+    if lx._peek() == '{':
+        lx._advance(1)
+        while True:
+            lx._skip_ws()
+            actions.append(parse_action(lx))
+            lx._skip_ws()
+            ch = lx._peek()
+            if ch == '}':
+                lx._advance(1)
+                break
+            if ch in ',;':
+                lx._advance(1)
+                continue
+            if lx.take('+'):
+                continue
+            raise ParseError('Expected , ; + or } in action list')
+    else:
+        actions.append(parse_action(lx))
+    return actions
+
+
+def parse_expr(lx: Lexer):
+    lx._skip_ws()
+    node = parse_term(lx)
+    lx._skip_ws()
+    while lx.take('OR'):
+        rhs = parse_term(lx)
+        node = Or(node, rhs)
+        lx._skip_ws()
+    return node
+
+
+def parse_term(lx: Lexer):
+    lx._skip_ws()
+    node = parse_factor(lx)
+    lx._skip_ws()
+    while lx.take('AND'):
+        rhs = parse_factor(lx)
+        node = And(node, rhs)
+        lx._skip_ws()
+    return node
+
+
+def parse_factor(lx: Lexer):
+    lx._skip_ws()
+    if lx.take('NOT'):
+        return Not(parse_factor(lx))
+    if lx._peek() == '(':
+        lx._advance(1)
+        node = parse_expr(lx)
+        lx._skip_ws()
+        if lx._peek() != ')':
+            raise ParseError('Expected )')
+        lx._advance(1)
+        return node
+    # function or comparison atom
+    # CHANGED(ind)
+    if lx.take('CHANGED'):
+        lx._skip_ws()
+        if lx._peek() != '(':
+            raise ParseError('Expected ( after CHANGED')
+        lx._advance(1)
+        ref = parse_value(lx)
+        lx._skip_ws()
+        if lx._peek() != ')':
+            raise ParseError('Expected ) in CHANGED()')
+        lx._advance(1)
+        return Changed(ref)
+    # prev(x[,n])
+    if lx.take('PREV'):
+        lx._skip_ws()
+        if lx._peek() != '(':
+            raise ParseError('Expected ( after PREV')
+        lx._advance(1)
+        ref = parse_value(lx)
+        lag = 1
+        lx._skip_ws()
+        if lx._peek() == ',':
+            lx._advance(1)
+            lx._skip_ws()
+            num = lx.number()
+            if num is None:
+                raise ParseError('Expected number for prev lag')
+            lag = int(num)
+        lx._skip_ws()
+        if lx._peek() != ')':
+            raise ParseError('Expected ) in prev()')
+        lx._advance(1)
+        return IndicatorRef(ref.name, ref.level, lag)
+    # comparison
+    left = parse_value(lx)
+    lx._skip_ws()
+    op = None
+    for cand in ('>=', '<=', '!=', '==', '>', '<'):
+        if lx.take(cand):
+            op = cand
+            break
+    if op is None:
+        raise ParseError('Expected comparison operator')
+    right = parse_value(lx)
+    return Compare(left, op, right)
+
+

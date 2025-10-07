@@ -85,14 +85,14 @@ class MainConfig(AppConfig):
             time.sleep(1.0)
             from django.conf import settings as django_settings
 
-            # Start Data Ingestion Service
-            if getattr(django_settings, 'AUTOSTART_INGESTION', True):
+            # Start Global Data Ingestion Service
+            if getattr(django_settings, 'AUTOSTART_GLOBAL_INGESTION', True):
                 try:
-                    from .services.ingestion_worker import start_ingestion
-                    start_ingestion()
-                    logger.info('Data Ingestion Service autostarted')
+                    from .services.global_ingestion_worker import start_global_ingestion
+                    start_global_ingestion()
+                    logger.info('Global Ingestion Service autostarted')
                 except Exception as e:
-                    logger.warning(f'Data Ingestion autostart failed: {e}')
+                    logger.warning(f'Global Ingestion autostart failed: {e}')
 
             # Start MT5 Monitoring Service (only if enabled in settings model)
             if getattr(django_settings, 'AUTOSTART_MT5_MONITORING', True):

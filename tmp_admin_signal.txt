@@ -1,0 +1,141 @@
+        'trading_system__system_sid', 'trading_system__name', 'timeframe'
+    ]
+    
+    list_editable = [
+        'level', 'is_active'
+    ]
+    
+    ordering = ['trading_system', 'level']
+    actions = ['scan_selected_timeframes']
+    
+    def expected_filename(self, obj):
+        return format_html('<code>{}</code>', obj.get_filename_pattern())
+    
+    expected_filename.short_description = 'Ожидаемый файл'
+    
+    def scan_selected_timeframes(self, request, queryset):
+        self.message_user(request, 'Legacy file scan is disabled in global-feed mode.')
+    scan_selected_timeframes.short_description = 'Legacy scan (disabled)'
+
+@admin.register(SignalEvent)
+class SignalEventAdmin(admin.ModelAdmin):
+    list_display = ['event_time', 'direction', 'action', 'trading_system', 'level', 'feed', 'values_short']
+    list_filter = ['trading_system', 'level', 'feed', 'direction', 'action']
+    search_fields = ['trading_system__system_sid']
+    date_hierarchy = 'event_time'
+    ordering = ['-event_time']
+    readonly_fields = ['ind_values']
+
+    def values_short(self, obj):
+        vals = obj.ind_values or {}
+        try:
+            items = list(vals.items()) if isinstance(vals, dict) else []
+            s = ', '.join(f"{k}={v}" for k, v in items[:4])
+            if len(items) > 4:
+                s += ' …'
+            return s or '-'
+        except Exception:
+            return '-'
+    values_short.short_description = 'Values'
+
+
+@admin.register(SignalExecutionLog)
+class SignalExecutionLogAdmin(admin.ModelAdmin):
+    list_display = ['executed_at', 'signal', 'success', 'short_message']
+    list_filter = ['success']
+    search_fields = ['signal__trading_system__system_sid']
+    ordering = ['-executed_at']
+
+    def short_message(self, obj):
+        msg = obj.message or ''
+        return (msg[:120] + '...') if len(msg) > 120 else msg
+    short_message.short_description = 'Message'
+
+
+
+# Настройка заголовков админ панели
+admin.site.site_header = "Project GCE 3 - Админ панель"
+admin.site.site_title = "Project GCE 3"
+admin.site.index_title = "Управление MT5 & Торговыми системами"
+
+
+# ============================================================================
+# Global feed admin
+# ============================================================================
+
+@admin.register(Instrument)
+class InstrumentAdmin(admin.ModelAdmin):
+    list_display = ['symbol', 'name', 'is_active']
+    search_fields = ['symbol', 'name']
+    list_filter = ['is_active']
+
+
+@admin.register(TFCode)
+class TFCodeAdmin(admin.ModelAdmin):
+    list_display = ['code', 'minutes', 'is_active']
+    list_editable = ['minutes', 'is_active']
+    search_fields = ['code']
+
+
+@admin.register(DataFeed)
+class DataFeedAdmin(admin.ModelAdmin):
+    list_display = ['provider', 'instrument', 'tfcode', 'is_active']
+    list_filter = ['provider', 'tfcode__code', 'is_active']
+    search_fields = ['instrument__symbol']
+
+
+@admin.register(MarketDataFile)
+class MarketDataFileAdmin(admin.ModelAdmin):
+    list_display = ['provider', 'filename', 'feed', 'file_size', 'file_modified', 'status', 'processed_at']
+    list_filter = ['provider', 'status', 'feed']
+    search_fields = ['filename']
+    readonly_fields = ['created_at', 'processed_at']
+    actions = ['scan_global_dir', 'import_all_pending', 'wipe_all_global', 'import_to_global']
+    change_list_template = 'admin/main/marketdatafile/change_list.html'
+
+    def import_to_global(self, request, queryset):
+        from .services.global_importer import import_market_datafile
+        ok = failed = 0
+        for mdf in queryset:
+            try:
+                import_market_datafile(mdf)
+                ok += 1
+            except Exception:
+                failed += 1
+        self.message_user(request, f"Imported to global feed → OK: {ok}, Failed: {failed}")
+    import_to_global.short_description = 'Import selected into Global Feed'
+
+    def scan_global_dir(self, request, queryset):
+        from .services.global_feed_collector import collect_global_dir
+        c, u, s = collect_global_dir()
+        self.message_user(request, f"Global scan: Created={c}, Updated={u}, Unchanged={s}")
+    scan_global_dir.short_description = 'Scan global TS_EXPORTS_DIR for files'
+
+    def import_all_pending(self, request, queryset):
+        from .services.global_importer import import_market_datafile
+        from .models import MarketDataFile
+        ok = failed = 0
+        for mdf in MarketDataFile.objects.filter(status='pending'):
+            try:
+                import_market_datafile(mdf); ok += 1
+            except Exception:
+                failed += 1
+        self.message_user(request, f"Imported all pending → OK: {ok}, Failed: {failed}")
+    import_all_pending.short_description = 'Import ALL pending files'
+
+    # --- Extra object-tool endpoints (no selection required) ---
+    def get_urls(self):
+        from django.urls import path
+        urls = super().get_urls()
+
+        def wrap(view):
+            return self.admin_site.admin_view(view)
+
+        return [
+            path('scan-global/', wrap(self._scan_global_view), name='main_marketdatafile_scan'),
+            path('import-all/', wrap(self._import_all_view), name='main_marketdatafile_import_all'),
+            path('wipe-all/', wrap(self._wipe_all_view), name='main_marketdatafile_wipe_all'),
+        ] + urls
+
+    def _scan_global_view(self, request):
+        self.scan_global_dir(request, queryset=None)

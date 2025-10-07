@@ -1,0 +1,81 @@
+def _eval(node, env_get):
+    if isinstance(node, IndicatorRef):
+        return env_get(node.name, node.level, node.lag)
+    if isinstance(node, (int, float)):
+        return node
+    if isinstance(node, Changed):
+        # env_get may carry attribute 'changed' to resolve CHANGED queries
+        try:
+            changed_fn = getattr(env_get, 'changed')
+        except Exception:
+            changed_fn = None
+        if changed_fn is None:
+            return False
+        return bool(changed_fn(node.ref.name, node.ref.level))
+    if isinstance(node, Not):
+        v = _eval(node.expr, env_get)
+        return not bool(v)
+    if isinstance(node, And):
+        return bool(_eval(node.left, env_get)) and bool(_eval(node.right, env_get))
+    if isinstance(node, Or):
+        return bool(_eval(node.left, env_get)) or bool(_eval(node.right, env_get))
+    if isinstance(node, Compare):
+        l = _eval(node.left, env_get)
+        r = _eval(node.right, env_get)
+        if l is None or r is None:
+            return False
+        if node.op == '==': return l == r
+        if node.op == '!=': return l != r
+        if node.op == '>': return l > r
+        if node.op == '<': return l < r
+        if node.op == '>=': return l >= r
+        if node.op == '<=': return l <= r
+    return False
+
+
+def generate_signals_for_system(system: TradingSystem, limit_bars: int = 500) -> List[SignalEvent]:
+    """Parse system rules and generate SignalEvent objects (not saved) for last N bars.
+
+    If system.signal_settings.use_global_feed is True, reads series from global feed layer using
+    TradingSystemTFBinding for TF level routing; otherwise uses legacy per-system Bar/Indicator tables.
+    """
+    # Load settings
+    try:
+        settings = system.signal_settings
+    except TradingSystemSignalSettings.DoesNotExist:
+        return []
+    if not settings.signal_logic:
+        return []
+
+    # Global-only mode
+    return _generate_signals_global(system, settings, limit_bars)
+
+
+def diagnose_system_for_signals(system: TradingSystem, limit_bars: int = 500) -> List[str]:
+    """Return human-readable diagnostics explaining why signals may not be produced.
+
+    This does not raise; it gives actionable hints (missing bindings, no bars, missing indicators, etc.).
+    """
+    msgs: List[str] = []
+    try:
+        settings = system.signal_settings
+    except TradingSystemSignalSettings.DoesNotExist:
+        return ["Signal settings not configured"]
+    if not (settings.signal_logic or '').strip():
+        msgs.append('Empty signal_logic')
+        return msgs
+
+    try:
+        rules = parse_rules(settings.signal_logic)
+    except Exception as e:
+        msgs.append(f'Rule parse error: {e}')
+        return msgs
+
+    req = _collect_requirements(rules)
+    base_level = settings.signal_base_tf_level or 1
+
+    # Global feed diagnostics only
+    base_binding = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+    if not base_binding:
+        return [f'No TF binding for base level L{base_level}']
+    base_feed = base_binding.feed

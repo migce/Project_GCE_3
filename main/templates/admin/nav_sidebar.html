@@ -1,0 +1,35 @@
+{% load i18n static admin_urls %}
+<nav class="sticky">
+  <div class="app-main">
+    <h2 class="section" style="padding:8px 16px; text-transform:uppercase; font-size:12px; letter-spacing:.03em; color:#6c757d;">Configuration</h2>
+    <ul class="model-list">
+      <li><a href="{% url 'admin:main_mt5connectionsettings_changelist' %}">Настройки MT5</a> <a href="{% url 'admin:main_mt5connectionsettings_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_marketdatafile_changelist' %}">Market data files</a> <a href="{% url 'admin:main_marketdatafile_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+    </ul>
+
+    <h2 class="section" style="padding:8px 16px; text-transform:uppercase; font-size:12px; letter-spacing:.03em; color:#6c757d;">Market data</h2>
+    <ul class="model-list">
+      <li><a href="{% url 'admin:main_marketbar_changelist' %}">Market bars</a> <a href="{% url 'admin:main_marketbar_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_marketindicatordef_changelist' %}">Market indicator defs</a> <a href="{% url 'admin:main_marketindicatordef_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_marketindicatorvalue_changelist' %}">Market indicator values</a> <a href="{% url 'admin:main_marketindicatorvalue_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_datafeed_changelist' %}">Data feeds</a> <a href="{% url 'admin:main_datafeed_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_instrument_changelist' %}">Instruments</a> <a href="{% url 'admin:main_instrument_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_tfcode_changelist' %}">Tf codes</a> <a href="{% url 'admin:main_tfcode_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+    </ul>
+
+    <h2 class="section" style="padding:8px 16px; text-transform:uppercase; font-size:12px; letter-spacing:.03em; color:#6c757d;">Trading systems</h2>
+    <ul class="model-list">
+      <li><a href="{% url 'admin:main_tradingsystem_changelist' %}">Торговые системы</a> <a href="{% url 'admin:main_tradingsystem_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_timeframe_changelist' %}">Таймфреймы</a> <a href="{% url 'admin:main_timeframe_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_signalevent_changelist' %}">Signal events</a> <a href="{% url 'admin:main_signalevent_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+      <li><a href="{% url 'admin:main_signalexecutionlog_changelist' %}">Signal execution logs</a> <a href="{% url 'admin:main_signalexecutionlog_add' %}" class="addlink">{% trans 'Add' %}</a></li>
+    </ul>
+
+    <h2 class="section" style="padding:8px 16px; text-transform:uppercase; font-size:12px; letter-spacing:.03em; color:#6c757d;">Monitoring</h2>
+    <ul class="model-list">
+      <li><a href="{% url 'admin:main_mt5monitoringsettings_changelist' %}">MT5 Monitoring Settings</a></li>
+      <li><a href="{% url 'admin:main_mt5connectionhealth_changelist' %}">MT5 Connection Health Records</a></li>
+      <li><a href="{% url 'admin:main_mt5connectionlog_changelist' %}">MT5 Connection Logs</a></li>
+    </ul>
+  </div>
+</nav>

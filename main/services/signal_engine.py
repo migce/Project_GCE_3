@@ -7,10 +7,6 @@ from django.db.models import Q
 
 from ..models import (
     TradingSystem,
-    TimeFrame,
-    Bar,
-    IndicatorDefinition,
-    IndicatorValue,
     TradingSystemSignalSettings,
     SignalEvent,
 )
@@ -63,6 +59,21 @@ class Rule:
     condition: Any
     action_then: List[str]  # list of actions
     action_else: Optional[List[str]] = None
+
+
+@dataclass
+class Changed:
+    ref: 'IndicatorRef'
+
+
+@dataclass
+class PosCount:
+    side: str  # 'BUY' or 'SELL'
+
+
+@dataclass
+class HasPos:
+    side: str  # 'BUY' or 'SELL'
 
 
 class ParseError(Exception):
@@ -219,7 +230,44 @@ def parse_factor(lx: Lexer):
         lx._advance(1)
         return node
     # function or comparison atom
-    # changed(
+    # HAS_BUY()/HAS_SELL() and COUNT_BUY()/COUNT_SELL()
+    if lx.take('HAS_BUY'):
+        lx._skip_ws();
+        if lx._peek() == '(':
+            lx._advance(1)
+            lx._skip_ws()
+            if lx._peek() != ')':
+                raise ParseError('Expected ) in HAS_BUY()')
+            lx._advance(1)
+        return HasPos('BUY')
+    if lx.take('HAS_SELL'):
+        lx._skip_ws();
+        if lx._peek() == '(':
+            lx._advance(1)
+            lx._skip_ws()
+            if lx._peek() != ')':
+                raise ParseError('Expected ) in HAS_SELL()')
+            lx._advance(1)
+        return HasPos('SELL')
+    if lx.take('COUNT_BUY'):
+        lx._skip_ws();
+        if lx._peek() == '(':
+            lx._advance(1)
+            lx._skip_ws()
+            if lx._peek() != ')':
+                raise ParseError('Expected ) in COUNT_BUY()')
+            lx._advance(1)
+        return PosCount('BUY')
+    if lx.take('COUNT_SELL'):
+        lx._skip_ws();
+        if lx._peek() == '(':
+            lx._advance(1)
+            lx._skip_ws()
+            if lx._peek() != ')':
+                raise ParseError('Expected ) in COUNT_SELL()')
+            lx._advance(1)
+        return PosCount('SELL')
+    # CHANGED(ind)
     if lx.take('CHANGED'):
         lx._skip_ws()
         if lx._peek() != '(':
@@ -228,10 +276,9 @@ def parse_factor(lx: Lexer):
         ref = parse_value(lx)
         lx._skip_ws()
         if lx._peek() != ')':
-            raise ParseError('Expected ) in changed()')
+            raise ParseError('Expected ) in CHANGED()')
         lx._advance(1)
-        # changed(x) => prev(x) != x
-        return Compare(IndicatorRef(ref.name, ref.level, max(ref.lag, 1)), '!=', IndicatorRef(ref.name, ref.level, 0))
+        return Changed(ref)
     # prev(x[,n])
     if lx.take('PREV'):
         lx._skip_ws()
@@ -356,6 +403,27 @@ def _eval(node, env_get):
         return env_get(node.name, node.level, node.lag)
     if isinstance(node, (int, float)):
         return node
+    if isinstance(node, PosCount):
+        try:
+            fn = getattr(env_get, 'pos_count')
+            return int(fn(node.side))
+        except Exception:
+            return 0
+    if isinstance(node, HasPos):
+        try:
+            fn = getattr(env_get, 'pos_count')
+            return bool(int(fn(node.side)) > 0)
+        except Exception:
+            return False
+    if isinstance(node, Changed):
+        # env_get may carry attribute 'changed' to resolve CHANGED queries
+        try:
+            changed_fn = getattr(env_get, 'changed')
+        except Exception:
+            changed_fn = None
+        if changed_fn is None:
+            return False
+        return bool(changed_fn(node.ref.name, node.ref.level))
     if isinstance(node, Not):
         v = _eval(node.expr, env_get)
         return not bool(v)
@@ -391,124 +459,8 @@ def generate_signals_for_system(system: TradingSystem, limit_bars: int = 500) ->
     if not settings.signal_logic:
         return []
 
-    if getattr(settings, 'use_global_feed', False):
-        return _generate_signals_global(system, settings, limit_bars)
-
-    rules = parse_rules(settings.signal_logic)
-
-    # Determine base timeframe by level
-    base_level = settings.signal_base_tf_level or 1
-    base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
-    if not base_tf:
-        return []
-
-    # Collect requirements (indicator name + level), include base level for indicators without explicit level
-    req = _collect_requirements(rules)
-    normalized_req: Set[Tuple[str, int]] = set()
-    for name, lvl in req:
-        normalized_req.add((name, lvl or base_level))
-
-    # All indicator names used
-    names = sorted({name for name, _ in normalized_req})
-    defs = {d.name: d for d in IndicatorDefinition.objects.filter(trading_system=system, name__in=names)}
-    # If no indicator definitions yet, nothing to do
-    if not defs:
-        return []
-
-    # Load last N base bars (most recent), then evaluate in chronological order
-    bars_desc = list(Bar.objects.filter(timeframe=base_tf).order_by('-dt')[:limit_bars])
-    bars = list(reversed(bars_desc))
-    if not bars:
-        return []
-    # Prefer server time for alignment with external charts; fallback to dt
-    def btime(b: Bar):
-        return getattr(b, 'dt_server', None) or b.dt
-    bar_times = [btime(b) for b in bars]
-
-    # Preload indicator series per (name, level)
-    series: Dict[Tuple[str, int], SeriesCursor] = {}
-    for name, lvl in normalized_req:
-        ind = defs.get(name)
-        if not ind:
-            continue
-        qs = IndicatorValue.objects.filter(
-            indicator=ind,
-            bar__timeframe__trading_system=system,
-            bar__timeframe__level=lvl,
-        ).select_related('bar').order_by('bar__dt')
-        times = [(getattr(iv.bar, 'dt_server', None) or iv.bar.dt) for iv in qs]
-        vals = [iv.value_int for iv in qs]
-        series[(name, lvl)] = SeriesCursor(times, vals)
-
-    # For base TF, we also need current and historical values on each bar for used indicators
-    base_series: Dict[str, List[Optional[int]]] = {name: [] for name in names}
-    qs_base = IndicatorValue.objects.filter(
-        indicator__trading_system=system,
-        indicator__name__in=names,
-        bar__timeframe=base_tf,
-        bar__in=[b.id for b in bars],
-    ).select_related('bar', 'indicator').order_by('bar__dt')
-    # Build map of bar_id -> {name: value}
-    base_map: Dict[int, Dict[str, Optional[int]]] = {}
-    for iv in qs_base:
-        base_map.setdefault(iv.bar_id, {})[iv.indicator.name] = iv.value_int
-    base_hist: Dict[str, List[Optional[int]]] = {n: [] for n in names}
-
-    # Helper to get value
-    def env_get(name: str, level: Optional[int], lag: int) -> Optional[int]:
-        lvl = level or base_level
-        if lvl == base_level:
-            hist = base_hist.get(name)
-            if hist is None:
-                return None
-            i = len(hist) - 1 - lag
-            if i < 0 or i >= len(hist):
-                return None
-            return hist[i]
-        cur = series.get((name, lvl))
-        if not cur:
-            return None
-        return cur.value(lag)
-
-    # Evaluate rules
-    events: List[SignalEvent] = []
-    for b in bars:
-        # advance non-base series to current bar server time
-        tnow = btime(b)
-        for cur in series.values():
-            cur.advance_to(tnow)
-        # append base values at this bar
-        curvals = base_map.get(b.id, {})
-        for n in names:
-            base_hist[n].append(curvals.get(n))
-
-        for r in rules:
-            ok = bool(_eval(r.condition, env_get))
-            actions = r.action_then if ok else (r.action_else or [])
-            for action in actions:
-                if action in ('BUY', 'SELL', 'CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE_BUY', 'CLOSE_SELL', 'EXIT_LONG', 'EXIT_SHORT'):
-                    # Map action to direction + open/close
-                    if action in ('BUY', 'SELL'):
-                        direction = action
-                        act_kind = 'OPEN'
-                    elif action in ('CLOSE_LONG', 'CLOSE_BUY', 'EXIT_LONG'):
-                        direction = 'BUY'
-                        act_kind = 'CLOSE'
-                    elif action in ('CLOSE_SHORT', 'CLOSE_SELL', 'EXIT_SHORT'):
-                        direction = 'SELL'
-                        act_kind = 'CLOSE'
-                    else:
-                        continue
-                    events.append(SignalEvent(
-                        trading_system=system,
-                        timeframe=base_tf,
-                        bar=b,
-                        direction=direction,
-                        rule_text=str(r),
-                        event_time=b.dt_server or b.dt,
-                        action=act_kind,
-                    ))
-    return events
+    # Global-only mode
+    return _generate_signals_global(system, settings, limit_bars)
 
 
 def diagnose_system_for_signals(system: TradingSystem, limit_bars: int = 500) -> List[str]:
@@ -534,56 +486,39 @@ def diagnose_system_for_signals(system: TradingSystem, limit_bars: int = 500) ->
     req = _collect_requirements(rules)
     base_level = settings.signal_base_tf_level or 1
 
-    if getattr(settings, 'use_global_feed', False):
-        # Global feed diagnostics
-        base_binding = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
-        if not base_binding:
-            return [f'No TF binding for base level L{base_level}']
-        base_feed = base_binding.feed
-        base_bar_cnt = MarketBar.objects.filter(feed=base_feed).count()
-        if base_bar_cnt == 0:
-            msgs.append(f'No MarketBar for base feed {base_feed}')
-        names = sorted({name for name, _ in req})
-        # Check presence of indicator defs per referenced level
-        missing_defs: List[str] = []
-        for name, lvl in req:
-            the_level = lvl or base_level
-            bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=the_level).select_related('feed').first()
-            if not bind:
-                msgs.append(f'No TF binding for L{the_level} (needed by {name})')
-                continue
-            if not MarketIndicatorDef.objects.filter(feed=bind.feed, name=name).exists():
-                missing_defs.append(f'{name}@L{the_level} (feed {bind.feed})')
-        if missing_defs:
-            msgs.append('Missing indicator defs: ' + ', '.join(missing_defs[:6]) + (' …' if len(missing_defs) > 6 else ''))
-        # Check base series values in window
-        bars_desc = list(MarketBar.objects.filter(feed=base_feed).order_by('-dt')[:limit_bars])
-        bars = list(reversed(bars_desc))
-        if bars:
-            dts = [b.dt for b in bars]
-            base_names = [n for (n, lvl) in req if (lvl or base_level) == base_level]
-            if base_names:
-                defs = list(MarketIndicatorDef.objects.filter(feed=base_feed, name__in=base_names))
-                val_cnt = MarketIndicatorValue.objects.filter(indicator__in=defs, bar__dt__in=dts).count()
-                if val_cnt == 0:
-                    msgs.append('No indicator values for base feed in the evaluated window')
-        return msgs or ['No rule condition matched in the evaluated window']
-    else:
-        # Legacy diagnostics
-        base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
-        if not base_tf:
-            return [f'No TimeFrame with level L{base_level}']
-        bar_cnt = Bar.objects.filter(timeframe=base_tf).count()
-        if bar_cnt == 0:
-            msgs.append('No Bars on base timeframe')
-        names = sorted({name for name, _ in req})
-        missing_defs: List[str] = []
-        for name in names:
-            if not IndicatorDefinition.objects.filter(trading_system=system, name=name).exists():
-                missing_defs.append(name)
-        if missing_defs:
-            msgs.append('Missing indicator defs: ' + ', '.join(missing_defs[:6]) + (' …' if len(missing_defs) > 6 else ''))
-        return msgs or ['No rule condition matched in the evaluated window']
+    # Global feed diagnostics only
+    base_binding = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+    if not base_binding:
+        return [f'No TF binding for base level L{base_level}']
+    base_feed = base_binding.feed
+    base_bar_cnt = MarketBar.objects.filter(feed=base_feed).count()
+    if base_bar_cnt == 0:
+        msgs.append(f'No MarketBar for base feed {base_feed}')
+    names = sorted({name for name, _ in req})
+    # Check presence of indicator defs per referenced level
+    missing_defs: List[str] = []
+    for name, lvl in req:
+        the_level = lvl or base_level
+        bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=the_level).select_related('feed').first()
+        if not bind:
+            msgs.append(f'No TF binding for L{the_level} (needed by {name})')
+            continue
+        if not MarketIndicatorDef.objects.filter(feed=bind.feed, name=name).exists():
+            missing_defs.append(f'{name}@L{the_level} (feed {bind.feed})')
+    if missing_defs:
+        msgs.append('Missing indicator defs: ' + ', '.join(missing_defs[:6]) + (' …' if len(missing_defs) > 6 else ''))
+    # Check base series values in window
+    bars_desc = list(MarketBar.objects.filter(feed=base_feed).order_by('-dt')[:limit_bars])
+    bars = list(reversed(bars_desc))
+    if bars:
+        dts = [b.dt for b in bars]
+        base_names = [n for (n, lvl) in req if (lvl or base_level) == base_level]
+        if base_names:
+            defs = list(MarketIndicatorDef.objects.filter(feed=base_feed, name__in=base_names))
+            val_cnt = MarketIndicatorValue.objects.filter(indicator__in=defs, bar__dt__in=dts).count()
+            if val_cnt == 0:
+                msgs.append('No indicator values for base feed in the evaluated window')
+    return msgs or ['No rule condition matched in the evaluated window']
 
 
 def _generate_signals_global(system: TradingSystem, settings: TradingSystemSignalSettings, limit_bars: int) -> List[SignalEvent]:
@@ -613,7 +548,8 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
         return []
 
     def btime_mb(b: MarketBar):
-        return getattr(b, 'dt_server', None) or b.dt
+        # Prefer dt for stable equality with legacy Bar.dt mapping
+        return b.dt
 
     bar_times = [btime_mb(b) for b in bars]
 
@@ -667,28 +603,81 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
         base_map.setdefault(iv.bar_id, {})[iv.indicator.name] = iv.value_int
     base_hist: Dict[str, List[Optional[int]]] = {n: [] for n in names}
 
-    # Resolve TimeFrame for events (base level)
-    base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
-
-    # Optionally map MarketBar.dt to local Bar for event.bar
-    # Build local bar map by dt if timeframe available
-    local_bar_map: Dict[Any, Bar] = {}
-    if base_tf:
-        dts = [b.dt for b in bars]
-        for lb in Bar.objects.filter(timeframe=base_tf, dt__in=dts):
-            local_bar_map[lb.dt] = lb
+    # Global-only: we no longer map to local Bar/TimeFrame
 
     events: List[SignalEvent] = []
+    # Pre-separate base and non-base requirement keys
+    base_names = sorted({n for (n, lvl) in normalized_req if lvl == base_level})
+    nonbase_keys = [(n, lvl) for (n, lvl) in normalized_req if lvl != base_level]
+    # Keep last seen value per non-base indicator across base bars to compute CHANGED reliably
+    nonbase_last_value: Dict[Tuple[str, int], Optional[int]] = {}
+
+    # --- Initialize position counters from persisted SignalEvents up to the first bar
+    pos_count: Dict[str, int] = {'BUY': 0, 'SELL': 0}
+    first_time = btime_mb(bars[0])
+    try:
+        seed_qs = SignalEvent.objects.filter(trading_system=system, level=base_level, event_time__lt=first_time)
+        # Prefer matching feed if bound
+        seed_bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+        if seed_bind and getattr(seed_bind, 'feed_id', None):
+            seed_qs = seed_qs.filter(feed_id=seed_bind.feed_id)
+        for ev in seed_qs.order_by('event_time'):
+            side = 'BUY' if ev.direction == 'BUY' else 'SELL'
+            if ev.action == 'OPEN':
+                pos_count[side] = pos_count.get(side, 0) + 1
+            else:
+                pos_count[side] = max(0, pos_count.get(side, 0) - 1)
+    except Exception:
+        pass
+
     for mb in bars:
         tnow = btime_mb(mb)
         for cur in series.values():
             cur.advance_to(tnow)
         curvals = base_map.get(mb.id, {})
+
+        # CHANGED map for base indicators at this bar (compare with previous base value)
+        changed_base: Dict[str, bool] = {}
+        for n in base_names:
+            prev = base_hist[n][-1] if base_hist[n] else None
+            curv = curvals.get(n)
+            changed_base[n] = (prev is not None) and (curv != prev)
+        # Append current base values after computing changed
         for n in names:
             base_hist[n].append(curvals.get(n))
 
+        # CHANGED map for non-base: true if current value differs from last snapshot
+        # across base bars (do not require timestamp equality).
+        changed_nonbase: Dict[Tuple[str, int], bool] = {}
+        for (n, lvl) in nonbase_keys:
+            cur = series.get((n, lvl))
+            key = (n, lvl)
+            if not cur:
+                changed_nonbase[key] = False
+                continue
+            curr_val = cur.value(0)
+            prev_val = nonbase_last_value.get(key)
+            # Follow base-level semantics: CHANGED is true only if a previous value exists and differs
+            changed_nonbase[key] = (prev_val is not None) and (curr_val != prev_val)
+            # Update snapshot for the next base bar
+            nonbase_last_value[key] = curr_val
+
+        def env_get(name: str, level: Optional[int], lag: int) -> Optional[int]:
+            return _env_get_global(name, level, lag, base_hist, base_level, series)
+
+        def _changed(name: str, level: Optional[int]) -> bool:
+            lvl = level or base_level
+            if lvl == base_level:
+                return bool(changed_base.get(name))
+            return bool(changed_nonbase.get((name, lvl)))
+        setattr(env_get, 'changed', _changed)
+
+        def _pos_count(side: str) -> int:
+            return int(pos_count.get(side, 0))
+        setattr(env_get, 'pos_count', _pos_count)
+
         for r in rules:
-            ok = bool(_eval(r.condition, lambda name, level, lag: _env_get_global(name, level, lag, base_hist, base_level, series)))
+            ok = bool(_eval(r.condition, env_get))
             actions = r.action_then if ok else (r.action_else or [])
             for action in actions:
                 if action in ('BUY', 'SELL', 'CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE_BUY', 'CLOSE_SELL', 'EXIT_LONG', 'EXIT_SHORT'):
@@ -701,16 +690,36 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                     else:
                         direction = 'SELL'
                         act_kind = 'CLOSE'
-                    ev_bar = local_bar_map.get(mb.dt) if local_bar_map else None
+                    # Suppress CLOSE when no open positions on that side
+                    if act_kind == 'CLOSE' and pos_count.get(direction, 0) <= 0:
+                        continue
+                    # Snapshot indicator values used for this decision
+                    snapshot: Dict[str, Optional[int]] = {}
+                    for name, lvl in normalized_req:
+                        eff = lvl
+                        key = f"{name}[L{eff}]"
+                        if eff == base_level:
+                            snapshot[key] = base_hist.get(name, [None])[-1]
+                        else:
+                            cur = series.get((name, eff))
+                            snapshot[key] = cur.value(0) if cur else None
                     events.append(SignalEvent(
                         trading_system=system,
-                        timeframe=base_tf if base_tf else TimeFrame.objects.filter(trading_system=system, level=base_level).first(),
-                        bar=ev_bar,
+                        timeframe=None,
+                        level=base_level,
+                        feed=base_feed,
+                        # bar link removed in global-only mode
                         direction=direction,
                         rule_text=str(r),
                         event_time=btime_mb(mb),
                         action=act_kind,
+                        ind_values=snapshot,
                     ))
+                    # Update local position counters to reflect generated stream
+                    if act_kind == 'OPEN':
+                        pos_count[direction] = pos_count.get(direction, 0) + 1
+                    else:
+                        pos_count[direction] = max(0, pos_count.get(direction, 0) - 1)
     return events
 
 

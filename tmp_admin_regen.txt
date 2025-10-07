@@ -1,0 +1,121 @@
+        self.message_user(request, f"Reset+Reimport complete. Files imported: {total_imported}")
+    reset_and_reimport.short_description = 'Reset data and reimport (selected systems)'
+
+    # Legacy scan action removed
+
+    # Legacy import/wipe actions removed in global-only mode
+
+    def generate_signals_now(self, request, queryset):
+        """Re-generate signals for selected systems from current rules and data.
+
+        Fully replaces existing SignalEvent records for each system to ensure
+        consistency after rule changes.
+        """
+        from django.db import transaction
+        from .services.signal_engine import generate_signals_for_system, diagnose_system_for_signals
+        from .models import TimeFrame
+        from .models import TradingSystemTFBinding, MarketBar
+
+        total_saved = 0
+        details = []
+        for system in queryset:
+            try:
+                # Determine full window size based on base TF and mode
+                try:
+                    settings = system.signal_settings
+                except Exception:
+                    settings = None
+                base_level = getattr(settings, 'signal_base_tf_level', None) or 1
+                use_global = bool(getattr(settings, 'use_global_feed', False))
+                limit = 1000
+                if use_global:
+                    bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+                    if bind:
+                        limit = MarketBar.objects.filter(feed=bind.feed).count() or 0
+                else:
+                    base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+                    if base_tf:
+                        # Legacy bars no longer used; fallback to a safe default if needed
+                        limit = 1000
+
+                events = generate_signals_for_system(system, limit_bars=max(0, limit))
+
+                with transaction.atomic():
+                    # Replace existing signals for the system
+                    SignalEvent.objects.filter(trading_system=system).delete()
+                    if events:
+                        # Bulk create for speed
+                        SignalEvent.objects.bulk_create(events, batch_size=1000)
+                        saved = len(events)
+                    else:
+                        saved = 0
+                total_saved += saved
+                if saved == 0:
+                    diag = diagnose_system_for_signals(system, limit_bars=200)
+                    hint = ("; ".join(diag[:2]) + (" …" if len(diag) > 2 else "")) if diag else "no details"
+                    details.append(f"{system.system_sid}: regenerated 0 ({hint})")
+                else:
+                    details.append(f"{system.system_sid}: regenerated {saved}")
+            except Exception as e:
+                details.append(f"{system.system_sid}: ERROR {e}")
+        msg = f"Signals regenerated: {total_saved}. " + (" | ".join(details[:4]) + (" …" if len(details) > 4 else ""))
+        self.message_user(request, msg)
+    generate_signals_now.short_description = 'Сгенерировать сигналы сейчас'
+
+
+@admin.register(TimeFrame)
+class TimeFrameAdmin(admin.ModelAdmin):
+    """Админ панель для таймфреймов"""
+    
+    list_display = [
+        'trading_system', 'timeframe', 'level', 'is_active',
+        'expected_filename'
+    ]
+    
+    list_filter = [
+        'timeframe', 'is_active', 'trading_system'
+    ]
+    
+    search_fields = [
+        'trading_system__system_sid', 'trading_system__name', 'timeframe'
+    ]
+    
+    list_editable = [
+        'level', 'is_active'
+    ]
+    
+    ordering = ['trading_system', 'level']
+    actions = ['scan_selected_timeframes']
+    
+    def expected_filename(self, obj):
+        return format_html('<code>{}</code>', obj.get_filename_pattern())
+    
+    expected_filename.short_description = 'Ожидаемый файл'
+    
+    def scan_selected_timeframes(self, request, queryset):
+        self.message_user(request, 'Legacy file scan is disabled in global-feed mode.')
+    scan_selected_timeframes.short_description = 'Legacy scan (disabled)'
+
+@admin.register(SignalEvent)
+class SignalEventAdmin(admin.ModelAdmin):
+    list_display = ['event_time', 'direction', 'action', 'trading_system', 'level', 'feed', 'price_close', 'values_short']
+    list_filter = ['trading_system', 'level', 'feed', 'direction', 'action']
+    search_fields = ['trading_system__system_sid']
+    date_hierarchy = 'event_time'
+    ordering = ['-event_time']
+    readonly_fields = ['ind_values']
+
+    def values_short(self, obj):
+        vals = obj.ind_values or {}
+        try:
+            items = list(vals.items()) if isinstance(vals, dict) else []
+            s = ', '.join(f"{k}={v}" for k, v in items[:4])
+            if len(items) > 4:
+                s += ' …'
+            return s or '-'
+        except Exception:
+            return '-'
+    values_short.short_description = 'Values'
+
+    def price_close(self, obj):
+        try:

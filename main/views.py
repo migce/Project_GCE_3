@@ -8,13 +8,11 @@ from .models import (
     MT5ConnectionLog,
     TradingSystem,
     TimeFrame,
-    DataFile,
     DataIngestionStatus,
-    ImportLog,
-    Bar,
     SignalEvent,
     TradingSystemSignalSettings,
 )
+from .models import TradingSystemTFBinding, MarketBar
 from django.conf import settings as django_settings
 from .services.mt5_service import MT5Service, MT5Manager
 import sys
@@ -999,148 +997,8 @@ def api_validate_csv_for_system(request, system_id):
 
 def api_process_csv_to_json(request, system_id):
     """API для обработки CSV файла и конвертации в JSON согласно конфигурации системы"""
-    if request.method == 'POST':
-        try:
-            # Получаем торговую систему
-            system = TradingSystem.objects.get(id=system_id)
-            
-            # Получаем имя файла из запроса
-            filename = request.POST.get('filename')
-            if not filename:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Filename not provided'
-                })
-            
-            # Полный путь к файлу
-            file_path = os.path.join(system.get_data_dir() if hasattr(system, 'get_data_dir') else getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS'), filename)
-            
-            if not os.path.exists(file_path):
-                return JsonResponse({
-                    'success': False,
-                    'message': f'File not found: {filename}'
-                })
-            
-            # Определяем разделитель
-            delimiter = ','
-            with open(file_path, 'r', encoding='utf-8-sig') as file:
-                sample = file.read(1024)
-                sniffer = csv.Sniffer()
-                try:
-                    delimiter = sniffer.sniff(sample).delimiter
-                except:
-                    delimiter = ','
-            
-            # Обрабатываем файл
-            processed_data = {
-                'system_info': {
-                    'system_sid': system.system_sid,
-                    'name': system.name,
-                    'symbol': system.symbol,
-                    'timeframes_count': system.timeframes_count,
-                    'time_offset_minutes': system.time_offset_minutes
-                },
-                'timeframes': {}
-            }
-            
-            # Читаем CSV файл
-            with open(file_path, 'r', encoding='utf-8-sig') as file:
-                reader = csv.DictReader(file, delimiter=delimiter)
-                
-                # Обрабатываем каждый таймфрейм
-                for timeframe in system.timeframes.all():
-                    timeframe_data = []
-                    file.seek(0)
-                    reader = csv.DictReader(file, delimiter=delimiter)
-                    
-                    for row in reader:
-                        if not any(row.values()):  # Пропускаем пустые строки
-                            continue
-                        
-                        try:
-                            # Формируем данные OHLC
-                            ohlc_data = {}
-                            
-                            if timeframe.datetime_column and timeframe.datetime_column in row:
-                                ohlc_data['datetime'] = row[timeframe.datetime_column]
-                            
-                            if timeframe.open_column and timeframe.open_column in row:
-                                ohlc_data['open'] = float(row[timeframe.open_column]) if row[timeframe.open_column] else None
-                            
-                            if timeframe.high_column and timeframe.high_column in row:
-                                ohlc_data['high'] = float(row[timeframe.high_column]) if row[timeframe.high_column] else None
-                            
-                            if timeframe.low_column and timeframe.low_column in row:
-                                ohlc_data['low'] = float(row[timeframe.low_column]) if row[timeframe.low_column] else None
-                            
-                            if timeframe.close_column and timeframe.close_column in row:
-                                ohlc_data['close'] = float(row[timeframe.close_column]) if row[timeframe.close_column] else None
-                            
-                            if timeframe.volume_column and timeframe.volume_column in row:
-                                ohlc_data['volume'] = float(row[timeframe.volume_column]) if row[timeframe.volume_column] else None
-                            
-                            timeframe_data.append(ohlc_data)
-                            
-                        except (ValueError, TypeError) as e:
-                            # Пропускаем строки с ошибками преобразования
-                            continue
-                    
-                    processed_data['timeframes'][f'timeframe_{timeframe.id}'] = {
-                        'config': {
-                            'open_column': timeframe.open_column,
-                            'high_column': timeframe.high_column,
-                            'low_column': timeframe.low_column,
-                            'close_column': timeframe.close_column,
-                            'volume_column': timeframe.volume_column,
-                            'datetime_column': timeframe.datetime_column,
-                            'datetime_format': timeframe.datetime_format
-                        },
-                        'data': timeframe_data
-                    }
-            
-            # Сохраняем обработанный файл в базу данных
-            data_file, created = DataFile.objects.get_or_create(
-                trading_system=system,
-                filename=filename,
-                defaults={
-                    'file_path': file_path,
-                    'json_data': processed_data,
-                    'is_processed': True,
-                    'processed_at': timezone.now()
-                }
-            )
-            
-            if not created:
-                # Обновляем существующий файл
-                data_file.json_data = processed_data
-                data_file.is_processed = True
-                data_file.processed_at = timezone.now()
-                data_file.save()
-            
-            return JsonResponse({
-                'success': True,
-                'filename': filename,
-                'system_name': system.name,
-                'processed_data': processed_data,
-                'data_file_id': data_file.id,
-                'total_records': sum(len(tf['data']) for tf in processed_data['timeframes'].values())
-            })
-            
-        except TradingSystem.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'message': 'Trading system not found'
-            })
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'message': f'Error processing CSV: {str(e)}'
-            })
-    
-    return JsonResponse({
-        'success': False,
-        'message': 'Method not allowed'
-    })
+    # Legacy CSV preview/import endpoint removed in global-only mode
+    return JsonResponse({'success': False, 'message': 'Legacy CSV endpoint disabled (global feed only).'}, status=410)
 
 
 def ingestion_status_api(request):
@@ -1161,22 +1019,20 @@ def ingestion_status_api(request):
 
 
 def ingestion_logs_api(request):
-    """API endpoint to return last 20 import logs."""
+    """Return last 20 MarketDataFile changes in global-only mode."""
     if request.method == 'GET':
-        logs = list(
-            ImportLog.objects.select_related('trading_system', 'timeframe')
-            .order_by('-created_at')[:20]
-        )
+        from .models import MarketDataFile
+        qs = MarketDataFile.objects.all().order_by('-processed_at', '-file_modified')[:20]
         data = []
-        for log in logs:
+        for m in qs:
             data.append({
-                'created_at': log.created_at.isoformat() if log.created_at else None,
-                'filename': log.filename,
-                'action': log.action,
-                'rows_imported': log.rows_imported,
-                'message': log.message or '',
-                'trading_system': log.trading_system.system_sid if log.trading_system else None,
-                'timeframe': log.timeframe.timeframe if log.timeframe else None,
+                'filename': m.filename,
+                'provider': m.provider,
+                'feed': str(m.feed) if m.feed_id else None,
+                'status': m.status,
+                'file_size': m.file_size,
+                'file_modified': m.file_modified.isoformat() if m.file_modified else None,
+                'processed_at': m.processed_at.isoformat() if m.processed_at else None,
             })
         return JsonResponse({'success': True, 'logs': data})
     return JsonResponse({'success': False, 'message': 'Only GET allowed'})
@@ -1185,8 +1041,8 @@ def ingestion_logs_api(request):
 def start_ingestion_service(request):
     if request.method == 'POST':
         try:
-            from .services.ingestion_worker import start_ingestion
-            start_ingestion()
+            from .services.global_ingestion_worker import start_global_ingestion
+            start_global_ingestion()
             st = DataIngestionStatus.get()
             st.active = True
             st.save(update_fields=['active', 'updated_at'])
@@ -1199,18 +1055,18 @@ def start_ingestion_service(request):
 def raw_signals_overview(request):
     """Raw Signals: compact per-system overview with last bar timestamps per TF."""
     systems_qs = TradingSystem.objects.all().prefetch_related('timeframes')
-    # Collect timeframe IDs to fetch last bar times in one query
-    all_tf_ids = []
-    for sys in systems_qs:
-        all_tf_ids.extend(tf.id for tf in sys.timeframes.all())
-
+    # Compute last_dt per TF via TF Binding -> MarketBar
     last_by_tf = {}
-    if all_tf_ids:
-        qs = (Bar.objects
-              .filter(timeframe_id__in=all_tf_ids)
-              .values('timeframe_id')
-              .annotate(last_dt=Max('dt')))
-        last_by_tf = {row['timeframe_id']: row['last_dt'] for row in qs}
+    for sys in systems_qs:
+        for tf in sys.timeframes.all():
+            try:
+                bind = TradingSystemTFBinding.objects.filter(trading_system=sys, level=getattr(tf, 'level', None)).select_related('feed').first()
+                if bind:
+                    last = MarketBar.objects.filter(feed=bind.feed).order_by('-dt').values_list('dt', flat=True).first()
+                    if last:
+                        last_by_tf[tf.id] = last
+            except Exception:
+                continue
 
     systems = []
     for sys in systems_qs:
@@ -1233,21 +1089,15 @@ def raw_signals_overview(request):
         except Exception:
             base_level = 1
         base_tf = next((x for x in tfs if getattr(x, 'level', None) == base_level), None)
-        if base_tf:
-            evs = list(SignalEvent.objects.filter(trading_system=sys, timeframe=base_tf, action='OPEN').order_by('-event_time')[:11])
+        evs = list(SignalEvent.objects.filter(trading_system=sys, level=base_level, action='OPEN').order_by('-event_time')[:11])
 
-            def get_close(ev):
-                if getattr(ev, 'bar', None) and ev.bar and ev.bar.close is not None:
-                    return float(ev.bar.close)
-                b = Bar.objects.filter(timeframe=ev.timeframe, dt_server=ev.event_time).first()
-                if not b:
-                    b = Bar.objects.filter(timeframe=ev.timeframe, dt=ev.event_time).first()
-                return float(b.close) if b and b.close is not None else None
+        def get_close(ev):
+            return _get_close_for_event(ev)
 
-            pip_scale = 100 if 'JPY' in (sys.symbol or '').upper() else 10000
-            # We show PnL on the previous (older) signal row, because the trade is closed at the current signal.
-            # evs is newest->oldest; for row i>0 we compute PnL between evs[i] (older, opened here) and evs[i-1] (newer, closed here).
-            for i, ev in enumerate(evs[:10]):
+        pip_scale = 100 if 'JPY' in (sys.symbol or '').upper() else 10000
+        # We show PnL on the previous (older) signal row, because the trade is closed at the current signal.
+        # evs is newest->oldest; for row i>0 we compute PnL between evs[i] (older, opened here) and evs[i-1] (newer, closed here).
+        for i, ev in enumerate(evs[:10]):
                 close_cur = get_close(ev)
                 pnl = None
                 if i > 0:
@@ -1279,8 +1129,8 @@ def raw_signals_overview(request):
 def stop_ingestion_service(request):
     if request.method == 'POST':
         try:
-            from .services.ingestion_worker import stop_ingestion
-            stop_ingestion()
+            from .services.global_ingestion_worker import stop_global_ingestion
+            stop_global_ingestion()
             st = DataIngestionStatus.get()
             st.active = False
             st.save(update_fields=['active', 'updated_at'])
@@ -1292,17 +1142,20 @@ def stop_ingestion_service(request):
 
 # --- Trading history derived from signals ---
 def _get_close_for_event(ev):
+    # Global feed via event.feed if present, else TF binding
     try:
-        if ev.bar and ev.bar.close is not None:
-            return float(ev.bar.close)
-    except Exception:
-        pass
-    try:
-        b = Bar.objects.filter(timeframe=ev.timeframe, dt_server=ev.event_time).first()
-        if not b:
-            b = Bar.objects.filter(timeframe=ev.timeframe, dt=ev.event_time).first()
-        if b and b.close is not None:
-            return float(b.close)
+        if getattr(ev, 'feed_id', None):
+            mb = MarketBar.objects.filter(feed_id=ev.feed_id, dt=ev.event_time).first()
+            if mb and mb.close is not None:
+                return float(mb.close)
+        lvl = getattr(ev, 'level', None) or getattr(getattr(ev, 'timeframe', None), 'level', None)
+        ts = getattr(ev, 'trading_system', None)
+        if ts and lvl:
+            bind = TradingSystemTFBinding.objects.filter(trading_system=ts, level=int(lvl)).select_related('feed').first()
+            if bind:
+                mb = MarketBar.objects.filter(feed=bind.feed, dt=ev.event_time).first()
+                if mb and mb.close is not None:
+                    return float(mb.close)
     except Exception:
         pass
     return None
@@ -1339,32 +1192,78 @@ def trading_history_ts(request):
                 base_level = int(tf_level)
             except Exception:
                 pass
+        # Keep selected_tf only for display; events are filtered by level
         selected_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
-        if selected_tf:
-            events = list(SignalEvent.objects.filter(trading_system=system, timeframe=selected_tf, action='OPEN')
-                          .order_by('-event_time')[:limit+1])
-            pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
-            for i in range(len(events)-1, 0, -1):
-                open_ev = events[i]
-                close_ev = events[i-1]
-                open_price = _get_close_for_event(open_ev)
-                close_price = _get_close_for_event(close_ev)
-                pnl = None
-                if open_price is not None and close_price is not None:
-                    pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
-                    total_pips += pnl
-                    total += 1
-                    if pnl > 0:
-                        wins += 1
-                trades.append({
-                    'open_time': open_ev.event_time,
-                    'open_dir': open_ev.direction,
-                    'open_price': open_price,
-                    'close_time': close_ev.event_time,
-                    'close_price': close_price,
-                    'pips': pnl,
-                })
 
+        # Use the same source as admin: persisted SignalEvent rows,
+        # additionally filtered by the bound feed for this TF level (if any).
+        fetch_n = max(2 * limit + 10, 50)
+        qs = SignalEvent.objects.filter(trading_system=system, level=base_level)
+        try:
+            bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+            if bind and bind.feed_id:
+                qs = qs.filter(feed_id=bind.feed_id)
+        except Exception:
+            pass
+        evs = list(qs.order_by('-event_time')[:fetch_n])
+        evs = list(reversed(evs))  # oldest→newest for sequential pairing
+
+        pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
+        open_ev = None
+        for ev in evs:
+            if getattr(ev, 'action', 'OPEN') == 'OPEN':
+                # start a position if none is open
+                if open_ev is None:
+                    open_ev = ev
+                else:
+                    # Fallback to reversal close if explicit CLOSE not present before next OPEN
+                    close_ev = ev
+                    open_price = _get_close_for_event(open_ev)
+                    close_price = _get_close_for_event(close_ev)
+                    pnl = None
+                    if open_price is not None and close_price is not None:
+                        pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                        total_pips += pnl
+                        total += 1
+                        if pnl > 0:
+                            wins += 1
+                    trades.append({
+                        'open_time': open_ev.event_time,
+                        'open_dir': open_ev.direction,
+                        'open_price': open_price,
+                        'open_id': getattr(open_ev, 'id', None),
+                        'close_time': close_ev.event_time,
+                        'close_price': close_price,
+                        'close_id': getattr(close_ev, 'id', None),
+                        'pips': pnl,
+                    })
+                    open_ev = ev  # treat this OPEN as start of next trade
+            else:  # action == 'CLOSE'
+                if open_ev is not None:
+                    close_ev = ev
+                    open_price = _get_close_for_event(open_ev)
+                    close_price = _get_close_for_event(close_ev)
+                    pnl = None
+                    if open_price is not None and close_price is not None:
+                        pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                        total_pips += pnl
+                        total += 1
+                        if pnl > 0:
+                            wins += 1
+                    trades.append({
+                        'open_time': open_ev.event_time,
+                        'open_dir': open_ev.direction,
+                        'open_price': open_price,
+                        'open_id': getattr(open_ev, 'id', None),
+                        'close_time': close_ev.event_time,
+                        'close_price': close_price,
+                        'close_id': getattr(close_ev, 'id', None),
+                        'pips': pnl,
+                    })
+                    open_ev = None
+
+    # Keep only last requested number of trades
+    trades = trades[-limit:]
     win_rate = (wins / total * 100.0) if total else 0.0
 
     context = {

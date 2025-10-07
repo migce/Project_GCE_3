@@ -56,7 +56,8 @@ ROOT_URLCONF = 'gce_project.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        # Project-level template overrides (for admin custom nav, etc.)
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -109,7 +110,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Server default timezone (display, conversions)
+TIME_ZONE = 'Europe/Moscow'
 
 USE_I18N = True
 
@@ -125,9 +127,11 @@ STATIC_URL = 'static/'
 TS_EXPORTS_DIR = os.environ.get('TS_EXPORTS_DIR', r'C:\\TS_EXPORTS')
 
 # Background services autostart
-AUTOSTART_INGESTION = True
+AUTOSTART_INGESTION = False  # legacy ingestion disabled in global-feed mode
 AUTOSTART_MT5_MONITORING = True
+AUTOSTART_GLOBAL_INGESTION = True
 DUAL_WRITE_GLOBAL_FEED = True
+LEGACY_WRITE_ENABLED = False
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

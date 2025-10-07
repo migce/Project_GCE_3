@@ -1,0 +1,121 @@
+def trading_history_ts(request):
+    systems = list(TradingSystem.objects.all().order_by('system_sid'))
+    system_id = request.GET.get('system')
+    tf_level = request.GET.get('tf')
+    limit = int(request.GET.get('limit') or 200)
+
+    system = None
+    if system_id:
+        try:
+            system = TradingSystem.objects.get(id=system_id)
+        except TradingSystem.DoesNotExist:
+            system = None
+    if not system and systems:
+        system = systems[0]
+
+    trades = []
+    total_pips = 0.0
+    wins = 0
+    total = 0
+    selected_tf = None
+    base_level = 1
+    if system:
+        try:
+            base_level = getattr(system, 'signal_settings', None).signal_base_tf_level or 1
+        except Exception:
+            base_level = 1
+        if tf_level:
+            try:
+                base_level = int(tf_level)
+            except Exception:
+                pass
+        # Keep selected_tf only for display; events are filtered by level
+        selected_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+        events = list(SignalEvent.objects.filter(trading_system=system, level=base_level, action='OPEN')
+                      .order_by('-event_time')[:limit+1])
+        pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
+        for i in range(len(events)-1, 0, -1):
+                open_ev = events[i]
+                close_ev = events[i-1]
+                open_price = _get_close_for_event(open_ev)
+                close_price = _get_close_for_event(close_ev)
+                pnl = None
+                if open_price is not None and close_price is not None:
+                    pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                    total_pips += pnl
+                    total += 1
+                    if pnl > 0:
+                        wins += 1
+                trades.append({
+                    'open_time': open_ev.event_time,
+                    'open_dir': open_ev.direction,
+                    'open_price': open_price,
+                    'close_time': close_ev.event_time,
+                    'close_price': close_price,
+                    'pips': pnl,
+                })
+
+    win_rate = (wins / total * 100.0) if total else 0.0
+
+    context = {
+        'systems': systems,
+        'selected_system': system,
+        'selected_tf': selected_tf,
+        'base_level': base_level,
+        'trades': list(reversed(trades)),
+        'total_pips': total_pips,
+        'win_rate': win_rate,
+        'total_trades': total,
+    }
+    return render(request, 'main/trading_history_ts.html', context)
+
+
+def trading_history_mt5(request):
+    systems = list(MT5ConnectionSettings.objects.all().order_by('-is_default', 'name'))
+    systems_magic = list(TradingSystem.objects.filter(magic_number__isnull=False).order_by('system_sid'))
+    settings_id = request.GET.get('conn')
+    sys_magic_id = request.GET.get('sys')
+    days = int(request.GET.get('days') or 7)
+    selected = None
+    if settings_id:
+        try:
+            selected = MT5ConnectionSettings.objects.get(id=settings_id)
+        except MT5ConnectionSettings.DoesNotExist:
+            selected = None
+    if not selected and systems:
+        selected = systems[0]
+
+    deals = []
+    summary = {'trades': 0, 'profit': 0.0}
+    error = None
+    selected_system = None
+    selected_magic = None
+    if sys_magic_id:
+        try:
+            selected_system = TradingSystem.objects.get(id=sys_magic_id)
+            selected_magic = selected_system.magic_number
+        except TradingSystem.DoesNotExist:
+            selected_system = None
+    if selected:
+        try:
+            from .services.mt5_service import MT5Service
+            from datetime import datetime, timedelta, timezone as dt_tz
+            import MetaTrader5 as mt5
+            with MT5Service(selected) as svc:
+                if svc.is_connected:
+                    try:
+                        acc = mt5.account_info()
+                        context_account_login = getattr(acc, 'login', None)
+                    except Exception:
+                        context_account_login = None
+                    # Direct calls history_deals_get with different variants (no history_select)
+                    raw = []
+                    attempts = []
+
+                    def try_direct(frm, to, label):
+                        try:
+                            res = mt5.history_deals_get(frm, to)
+                        except Exception:
+                            res = None
+                        cnt = len(res) if res else 0
+                        attempts.append((label, cnt))

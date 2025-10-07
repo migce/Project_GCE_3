@@ -1,0 +1,184 @@
+def _generate_signals_global(system: TradingSystem, settings: TradingSystemSignalSettings, limit_bars: int) -> List[SignalEvent]:
+    """Global-feed backed signal generation."""
+    try:
+        rules = parse_rules(settings.signal_logic)
+    except ParseError:
+        return []
+
+    base_level = settings.signal_base_tf_level or 1
+    base_binding = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed__tfcode', 'feed__instrument').first()
+    if not base_binding:
+        return []
+    base_feed = base_binding.feed
+
+    # Collect requirements
+    req = _collect_requirements(rules)
+    normalized_req: Set[Tuple[str, int]] = set()
+    for name, lvl in req:
+        normalized_req.add((name, (lvl or base_level)))
+    names = sorted({name for name, _ in normalized_req})
+
+    # Load last N base bars from MarketBar
+    bars_desc = list(MarketBar.objects.filter(feed=base_feed).order_by('-dt')[:limit_bars])
+    bars = list(reversed(bars_desc))
+    if not bars:
+        return []
+
+    def btime_mb(b: MarketBar):
+        # Prefer dt for stable equality with legacy Bar.dt mapping
+        return b.dt
+
+    bar_times = [btime_mb(b) for b in bars]
+
+    # Prepare cursor series for non-base levels
+    # Map TF level -> feed
+    feed_by_level: Dict[int, DataFeed] = {}
+    for _, lvl in normalized_req:
+        if lvl == base_level:
+            continue
+        if lvl not in feed_by_level:
+            b = TradingSystemTFBinding.objects.filter(trading_system=system, level=lvl).select_related('feed').first()
+            if not b:
+                # requirement references unbound level; skip entire run
+                return []
+            feed_by_level[lvl] = b.feed
+
+    # Indicator definitions per feed
+    defs_per_feed: Dict[Tuple[DataFeed, str], MarketIndicatorDef] = {}
+    for name, lvl in normalized_req:
+        f = base_feed if lvl == base_level else feed_by_level.get(lvl)
+        if not f:
+            return []
+        d = MarketIndicatorDef.objects.filter(feed=f, name=name).first()
+        if d:
+            defs_per_feed[(f, name)] = d
+    if not defs_per_feed:
+        return []
+
+    # Build series for non-base levels
+    series: Dict[Tuple[str, int], SeriesCursor] = {}
+    for name, lvl in normalized_req:
+        if lvl == base_level:
+            continue
+        f = feed_by_level.get(lvl)
+        ind = defs_per_feed.get((f, name)) if f else None
+        if not ind:
+            continue
+        qs = MarketIndicatorValue.objects.filter(indicator=ind).select_related('bar').order_by('bar__dt')
+        times = [(getattr(iv.bar, 'dt_server', None) or iv.bar.dt) for iv in qs]
+        vals = [iv.value_int for iv in qs]
+        series[(name, lvl)] = SeriesCursor(times, vals)
+
+    # Base series values over our base bars window
+    base_defs = {name: defs_per_feed.get((base_feed, name)) for name in names}
+    base_map: Dict[int, Dict[str, Optional[int]]] = {}
+    qs_base = MarketIndicatorValue.objects.filter(
+        indicator__in=[d for d in base_defs.values() if d],
+        bar__in=[b.id for b in bars],
+    ).select_related('bar', 'indicator').order_by('bar__dt')
+    for iv in qs_base:
+        base_map.setdefault(iv.bar_id, {})[iv.indicator.name] = iv.value_int
+    base_hist: Dict[str, List[Optional[int]]] = {n: [] for n in names}
+
+    # Global-only: we no longer map to local Bar/TimeFrame
+
+    events: List[SignalEvent] = []
+    # Pre-separate base and non-base requirement keys
+    base_names = sorted({n for (n, lvl) in normalized_req if lvl == base_level})
+    nonbase_keys = [(n, lvl) for (n, lvl) in normalized_req if lvl != base_level]
+
+    for mb in bars:
+        tnow = btime_mb(mb)
+        for cur in series.values():
+            cur.advance_to(tnow)
+        curvals = base_map.get(mb.id, {})
+
+        # CHANGED map for base indicators at this bar (compare with previous base value)
+        changed_base: Dict[str, bool] = {}
+        for n in base_names:
+            prev = base_hist[n][-1] if base_hist[n] else None
+            curv = curvals.get(n)
+            changed_base[n] = (prev is not None) and (curv != prev)
+        # Append current base values after computing changed
+        for n in names:
+            base_hist[n].append(curvals.get(n))
+
+        # CHANGED map for non-base: true only on the base bar where series advanced
+        changed_nonbase: Dict[Tuple[str, int], bool] = {}
+        for (n, lvl) in nonbase_keys:
+            cur = series.get((n, lvl))
+            if not cur:
+                changed_nonbase[(n, lvl)] = False
+                continue
+            i = cur.idx
+            flag = False
+            if i >= 1 and i < len(cur.times):
+                if cur.times[i] == tnow:
+                    prev_v = cur.values[i-1]
+                    cur_v = cur.values[i]
+                    flag = (prev_v != cur_v)
+            changed_nonbase[(n, lvl)] = flag
+
+        def env_get(name: str, level: Optional[int], lag: int) -> Optional[int]:
+            return _env_get_global(name, level, lag, base_hist, base_level, series)
+
+        def _changed(name: str, level: Optional[int]) -> bool:
+            lvl = level or base_level
+            if lvl == base_level:
+                return bool(changed_base.get(name))
+            return bool(changed_nonbase.get((name, lvl)))
+        setattr(env_get, 'changed', _changed)
+
+        for r in rules:
+            ok = bool(_eval(r.condition, env_get))
+            actions = r.action_then if ok else (r.action_else or [])
+            for action in actions:
+                if action in ('BUY', 'SELL', 'CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE_BUY', 'CLOSE_SELL', 'EXIT_LONG', 'EXIT_SHORT'):
+                    if action in ('BUY', 'SELL'):
+                        direction = action
+                        act_kind = 'OPEN'
+                    elif action in ('CLOSE_LONG', 'CLOSE_BUY', 'EXIT_LONG'):
+                        direction = 'BUY'
+                        act_kind = 'CLOSE'
+                    else:
+                        direction = 'SELL'
+                        act_kind = 'CLOSE'
+                    # Snapshot indicator values used for this decision
+                    snapshot: Dict[str, Optional[int]] = {}
+                    for name, lvl in normalized_req:
+                        eff = lvl
+                        key = f"{name}[L{eff}]"
+                        if eff == base_level:
+                            snapshot[key] = base_hist.get(name, [None])[-1]
+                        else:
+                            cur = series.get((name, eff))
+                            snapshot[key] = cur.value(0) if cur else None
+                    events.append(SignalEvent(
+                        trading_system=system,
+                        timeframe=None,
+                        level=base_level,
+                        feed=base_feed,
+                        # bar link removed in global-only mode
+                        direction=direction,
+                        rule_text=str(r),
+                        event_time=btime_mb(mb),
+                        action=act_kind,
+                        ind_values=snapshot,
+                    ))
+    return events
+
+
+def _env_get_global(name: str, level: Optional[int], lag: int, base_hist: Dict[str, List[Optional[int]]], base_level: int, series: Dict[Tuple[str, int], SeriesCursor]) -> Optional[int]:
+    lvl = level or base_level
+    if lvl == base_level:
+        hist = base_hist.get(name)
+        if hist is None:
+            return None
+        i = len(hist) - 1 - lag
+        if i < 0 or i >= len(hist):
+            return None
+        return hist[i]
+    cur = series.get((name, lvl))
+    if not cur:
+        return None
+    return cur.value(lag)

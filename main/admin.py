@@ -11,11 +11,6 @@ from .models import (
     TradingSystem,
     TradingSystemSignalSettings,
     TimeFrame,
-    DataFile,
-    IndicatorDefinition,
-    Bar,
-    IndicatorValue,
-    ImportLog,
     SignalEvent,
     SignalExecutionLog,
 )
@@ -344,7 +339,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     list_display = [
         'system_status_icon', 'system_sid', 'name', 'symbol', 'magic_number', 'magic_number', 
         'timeframes_count', 'time_offset_minutes', 'is_active', 'trading_enabled', 'is_sar', 'lot_size',
-        'files_count', 'created_at'
+        'created_at'
     ]
     
     list_filter = [
@@ -391,7 +386,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
         verbose_name = 'Signal Logic'
         verbose_name_plural = 'Signal Logic'
         readonly_fields = ['indicators_available']
-        fields = ('signal_logic', 'signal_base_tf_level', 'use_global_feed', 'signal_indicators', 'indicators_available')
+        fields = ('signal_logic', 'signal_base_tf_level', 'signal_indicators', 'indicators_available')
 
         def get_formset(self, request, obj=None, **kwargs):
             # Keep a reference to parent TradingSystem for readonly field rendering when obj is not yet saved
@@ -409,52 +404,23 @@ class TradingSystemAdmin(admin.ModelAdmin):
             if ts is None:
                 return 'Save Trading System first to see indicators.'
 
-            # If using global feed, collect per-binding names from MarketIndicatorDef
-            try:
-                use_global = bool(getattr(obj, 'use_global_feed', False))
-            except Exception:
-                use_global = False
-            if use_global:
-                from .models import TradingSystemTFBinding, MarketIndicatorDef
-                bindings = list(TradingSystemTFBinding.objects.filter(trading_system=ts).select_related('feed'))
-                if not bindings:
-                    return 'No TF bindings yet. Add bindings to see indicators.'
-                levels_map = {}
-                all_names = set()
-                for b in bindings:
-                    names = list(MarketIndicatorDef.objects.filter(feed=b.feed)
-                                 .values_list('name', flat=True).order_by('name').distinct())
-                    for n in names:
-                        levels_map.setdefault(n, set()).add(int(b.level))
-                    all_names.update(names)
-                if not all_names:
-                    return 'No indicators detected yet in global feed. Import data or verify bindings.'
-                lines = []
-                for name in sorted(all_names):
-                    lvls = sorted(levels_map.get(name, []))
-                    lvls_str = ', '.join(f'L{v}' for v in lvls) if lvls else '-'
-                    lines.append(f"{name}: {lvls_str}")
-                html = '<pre style="white-space: pre-wrap; background:#f8f9fa; padding:8px; border-radius:4px; max-height:240px; overflow:auto;">' \
-                       + '\n'.join(lines) + '</pre>'
-                return format_html(html)
-
-            # Legacy per-system collection
-            names = list(IndicatorDefinition.objects.filter(trading_system=ts)
-                        .values_list('name', flat=True).order_by('name').distinct())
-            rows = IndicatorValue.objects.filter(indicator__trading_system=ts)
-            rows = rows.values_list('indicator__name', 'tf_level').distinct()
+            # Always read from global feed
+            from .models import TradingSystemTFBinding, MarketIndicatorDef
+            bindings = list(TradingSystemTFBinding.objects.filter(trading_system=ts).select_related('feed'))
+            if not bindings:
+                return 'No TF bindings yet. Add bindings to see indicators.'
             levels_map = {}
-            for name, lvl in rows:
-                if name not in levels_map:
-                    levels_map[name] = set()
-                if lvl is not None:
-                    levels_map[name].add(int(lvl))
-
-            if not names:
-                return 'No indicators detected yet. Import data to populate the list.'
-
+            all_names = set()
+            for b in bindings:
+                names = list(MarketIndicatorDef.objects.filter(feed=b.feed)
+                             .values_list('name', flat=True).order_by('name').distinct())
+                for n in names:
+                    levels_map.setdefault(n, set()).add(int(b.level))
+                all_names.update(names)
+            if not all_names:
+                return 'No indicators detected yet in global feed. Import data or verify bindings.'
             lines = []
-            for name in names:
+            for name in sorted(all_names):
                 lvls = sorted(levels_map.get(name, []))
                 lvls_str = ', '.join(f'L{v}' for v in lvls) if lvls else '-'
                 lines.append(f"{name}: {lvls_str}")
@@ -470,7 +436,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
         ordering = ['level']
 
     inlines = [TimeFrameInline, TFBindingInline, SignalSettingsInline]
-    actions = ['scan_data_files', 'import_pending_files', 'wipe_market_data', 'generate_signals_now']
+    actions = ['scan_global_files', 'import_global_pending', 'wipe_global_market_data', 'reset_and_reimport', 'generate_signals_now']
     
     def system_status_icon(self, obj):
         if obj.is_active:
@@ -527,112 +493,147 @@ class TradingSystemAdmin(admin.ModelAdmin):
             fs = new_fs
         return fs
 
-    def scan_data_files(self, request, queryset):
-        import os, glob
-        from .services.datafile_collector import collect_for_system
-        total_created = total_updated = total_skipped = 0
-        debug_lines = []
+    def scan_global_files(self, request, queryset):
+        from .services.global_feed_collector import collect_for_system
+        total_c = total_u = total_s = 0
         for system in queryset:
-            data_dir = system.get_data_dir() if hasattr(system, 'get_data_dir') else ''
-            pattern = os.path.join(data_dir, system.get_file_pattern()) if data_dir else ''
-            try:
-                found = glob.glob(pattern) if pattern else []
-            except Exception:
-                found = []
-        c, u, s = collect_for_system(system)
-        total_created += c
-        total_updated += u
-        total_skipped += s
-        debug_lines.append(f"{system.system_sid}: dir={data_dir}, pattern={system.get_file_pattern()}, matches={len(found)}")
-        if found:
-            preview = ", ".join(os.path.basename(f) for f in found[:3])
-            debug_lines.append(f"  e.g.: {preview}{' …' if len(found)>3 else ''}")
-        # surface any per-file errors from collector
-        errors = getattr(collect_for_system, 'last_errors', [])
-        if errors:
-            debug_lines.append(f"  errors: {len(errors)} → {errors[:2]}{' …' if len(errors)>2 else ''}")
-        self.message_user(
-            request,
-            "Scanned. Created: %d, Updated: %d, Unchanged: %d" % (total_created, total_updated, total_skipped)
-        )
-        if debug_lines:
-            self.message_user(request, " | ".join(debug_lines))
-    scan_data_files.short_description = 'Сканировать папку данных и обновить файлы'
+            c, u, s = collect_for_system(system)
+            total_c += c; total_u += u; total_s += s
+        self.message_user(request, f"Global scan → Created: {total_c}, Updated: {total_u}, Unchanged: {total_s}")
+    scan_global_files.short_description = 'Scan global feed files (by TF bindings)'
 
-    def import_pending_files(self, request, queryset):
-        from .services.bar_importer import import_datafile
-        from .models import DataFile
+    def import_global_pending(self, request, queryset):
+        from .models import MarketDataFile
+        from .services.global_importer import import_market_datafile
         ok = failed = 0
+        details = []
         for system in queryset:
-            qs = DataFile.objects.filter(trading_system=system, status='pending')
-            for df in qs:
+            mdfs = MarketDataFile.objects.filter(feed__system_bindings__trading_system=system, status='pending')
+            for mdf in mdfs:
                 try:
-                    import_datafile(df)
+                    res = import_market_datafile(mdf)
+                    ok += 1
+                except Exception as e:
+                    failed += 1
+                    details.append(f"{mdf.filename}: {e}")
+        self.message_user(request, f"Global import → OK: {ok}, Failed: {failed} {'| ' + ', '.join(details[:2]) if details else ''}")
+    import_global_pending.short_description = 'Import global pending files'
+
+    def wipe_global_market_data(self, request, queryset):
+        from django.db import transaction
+        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog
+        total_bars = total_vals = total_defs = total_signals = total_execs = 0
+        with transaction.atomic():
+            for system in queryset:
+                feeds = [b.feed_id for b in system.tf_bindings.all()]
+                if not feeds:
+                    continue
+                vals_qs = MarketIndicatorValue.objects.filter(bar__feed_id__in=feeds)
+                total_vals += vals_qs.count()
+                vals_qs.delete()
+                bars_qs = MarketBar.objects.filter(feed_id__in=feeds)
+                total_bars += bars_qs.count()
+                bars_qs.delete()
+                defs_qs = MarketIndicatorDef.objects.filter(feed_id__in=feeds)
+                total_defs += defs_qs.count()
+                defs_qs.delete()
+                # Derived outputs: signals and executions for this system
+                exec_qs = SignalExecutionLog.objects.filter(signal__trading_system=system)
+                total_execs += exec_qs.count()
+                exec_qs.delete()
+                sig_qs = SignalEvent.objects.filter(trading_system=system)
+                total_signals += sig_qs.count()
+                sig_qs.delete()
+                # Reset MarketDataFile status to pending to force re-import
+                MarketDataFile.objects.filter(feed_id__in=feeds).update(status='pending', processed_at=None)
+        self.message_user(request, f"Wiped global data for selected systems → Bars={total_bars}, IndicatorValues={total_vals}, IndicatorDefs={total_defs}, Signals={total_signals}, ExecLogs={total_execs}")
+        wipe_global_market_data.short_description = 'Wipe global market data for selected systems'
+
+    def reset_and_reimport(self, request, queryset):
+        """Full reset (wipe + rescan + reimport + regenerate) for selected systems."""
+        from .services.global_feed_collector import collect_for_system
+        from .services.global_importer import import_market_datafile
+        from .models import MarketDataFile
+        total_imported = 0
+        for system in queryset:
+            # Wipe
+            self.wipe_global_market_data(request, [system])
+            # Re-scan
+            collect_for_system(system)
+            # Import all files for bound feeds
+            feed_ids = [b.feed_id for b in system.tf_bindings.all()]
+            files = MarketDataFile.objects.filter(feed_id__in=feed_ids)
+            ok = 0
+            for mdf in files:
+                try:
+                    import_market_datafile(mdf)
                     ok += 1
                 except Exception:
-                    failed += 1
-        self.message_user(request, f"Imported pending files → OK: {ok}, Failed: {failed}")
-    import_pending_files.short_description = 'Импортировать все pending файлы системы'
+                    pass
+            total_imported += ok
+            # Regenerate signals
+            self.generate_signals_now(request, [system])
+        self.message_user(request, f"Reset+Reimport complete. Files imported: {total_imported}")
+    reset_and_reimport.short_description = 'Reset data and reimport (selected systems)'
 
-    def wipe_market_data(self, request, queryset):
-        from django.db import transaction
-        from .models import DataIngestionStatus
-        with transaction.atomic():
-            iv_cnt = IndicatorValue.objects.count()
-            IndicatorValue.objects.all().delete()
-            bar_cnt = Bar.objects.count()
-            Bar.objects.all().delete()
-            log_cnt = ImportLog.objects.count()
-            ImportLog.objects.all().delete()
-            df_qs = DataFile.objects.all()
-            df_cnt = df_qs.count()
-            df_qs.update(status='pending', rows_processed=None, processed_at=None, error_message='')
-            st = DataIngestionStatus.get()
-            st.files_scanned = 0
-            st.files_imported = 0
-            st.rows_imported = 0
-            st.last_run = None
-            st.last_error = ''
-            st.save()
-        self.message_user(request, f"Wiped market data. Bars={bar_cnt}, IndicatorValues={iv_cnt}, Logs={log_cnt}, Files reset={df_cnt}")
-    wipe_market_data.short_description = 'Очистить рыночные данные (Bars/Indicators/Logs)'
+    # Legacy scan action removed
+
+    # Legacy import/wipe actions removed in global-only mode
 
     def generate_signals_now(self, request, queryset):
-        """Manually run signal generation for selected systems and save events."""
+        """Re-generate signals for selected systems from current rules and data.
+
+        Fully replaces existing SignalEvent records for each system to ensure
+        consistency after rule changes.
+        """
         from django.db import transaction
         from .services.signal_engine import generate_signals_for_system, diagnose_system_for_signals
+        from .models import TimeFrame
+        from .models import TradingSystemTFBinding, MarketBar
 
         total_saved = 0
         details = []
         for system in queryset:
             try:
-                events = generate_signals_for_system(system, limit_bars=1000)
-                if not events:
+                # Determine full window size based on base TF and mode
+                try:
+                    settings = system.signal_settings
+                except Exception:
+                    settings = None
+                base_level = getattr(settings, 'signal_base_tf_level', None) or 1
+                use_global = bool(getattr(settings, 'use_global_feed', False))
+                limit = 1000
+                if use_global:
+                    bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+                    if bind:
+                        limit = MarketBar.objects.filter(feed=bind.feed).count() or 0
+                else:
+                    base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+                    if base_tf:
+                        # Legacy bars no longer used; fallback to a safe default if needed
+                        limit = 1000
+
+                events = generate_signals_for_system(system, limit_bars=max(0, limit))
+
+                with transaction.atomic():
+                    # Replace existing signals for the system
+                    SignalEvent.objects.filter(trading_system=system).delete()
+                    if events:
+                        # Bulk create for speed
+                        SignalEvent.objects.bulk_create(events, batch_size=1000)
+                        saved = len(events)
+                    else:
+                        saved = 0
+                total_saved += saved
+                if saved == 0:
                     diag = diagnose_system_for_signals(system, limit_bars=200)
                     hint = ("; ".join(diag[:2]) + (" …" if len(diag) > 2 else "")) if diag else "no details"
-                    details.append(f"{system.system_sid}: no signals ({hint})")
-                    continue
-                saved = 0
-                with transaction.atomic():
-                    for ev in events:
-                        obj, created = SignalEvent.objects.get_or_create(
-                            trading_system=ev.trading_system,
-                            timeframe=ev.timeframe,
-                            event_time=ev.event_time,
-                            direction=ev.direction,
-                            action=getattr(ev, 'action', 'OPEN'),
-                            defaults={'rule_text': ev.rule_text, 'bar': ev.bar},
-                        )
-                        if not created and obj.bar_id is None and ev.bar_id:
-                            obj.bar = ev.bar
-                            obj.save(update_fields=['bar'])
-                        if created:
-                            saved += 1
-                total_saved += saved
-                details.append(f"{system.system_sid}: saved {saved}")
+                    details.append(f"{system.system_sid}: regenerated 0 ({hint})")
+                else:
+                    details.append(f"{system.system_sid}: regenerated {saved}")
             except Exception as e:
                 details.append(f"{system.system_sid}: ERROR {e}")
-        msg = f"Signals generated. New events: {total_saved}. " + (" | ".join(details[:4]) + (" …" if len(details) > 4 else ""))
+        msg = f"Signals regenerated: {total_saved}. " + (" | ".join(details[:4]) + (" …" if len(details) > 4 else ""))
         self.message_user(request, msg)
     generate_signals_now.short_description = 'Сгенерировать сигналы сейчас'
 
@@ -642,8 +643,8 @@ class TimeFrameAdmin(admin.ModelAdmin):
     """Админ панель для таймфреймов"""
     
     list_display = [
-        'trading_system', 'timeframe', 'level', 'is_active', 
-        'expected_filename', 'files_count'
+        'trading_system', 'timeframe', 'level', 'is_active',
+        'expected_filename'
     ]
     
     list_filter = [
@@ -659,99 +660,56 @@ class TimeFrameAdmin(admin.ModelAdmin):
     ]
     
     ordering = ['trading_system', 'level']
-    actions = ['scan_selected_timeframes', 'import_pending_for_timeframes']
+    actions = ['scan_selected_timeframes']
     
     def expected_filename(self, obj):
         return format_html('<code>{}</code>', obj.get_filename_pattern())
     
     expected_filename.short_description = 'Ожидаемый файл'
     
-    def files_count(self, obj):
-        count = obj.data_files.count()
-        if count > 0:
-            return format_html(
-                '<a href="{}?timeframe__id__exact={}">{}</a>',
-                reverse('admin:main_datafile_changelist'),
-                obj.id,
-                count
-            )
-        return '0'
-    
-    files_count.short_description = 'Файлов'
-
-
     def scan_selected_timeframes(self, request, queryset):
-        from .services.datafile_collector import collect_for_timeframe
-        total_created = total_updated = total_skipped = 0
-        for tf in queryset:
-            c, u, s = collect_for_timeframe(tf)
-            total_created += c
-            total_updated += u
-            total_skipped += s
-        self.message_user(
-            request,
-            f"Synced files. Created: {total_created}, Updated: {total_updated}, Unchanged: {total_skipped}"
-        )
-    scan_selected_timeframes.short_description = 'Сканировать файлы для выбранных таймфреймов'
-
-@admin.register(Bar)
-class BarAdmin(admin.ModelAdmin):
-    list_display = ['dt', 'bartime', 'timeframe', 'trading_system', 'open', 'high', 'low', 'close', 'volume', 'data_file']
-    list_filter = ['timeframe', 'trading_system']
-    search_fields = ['symbol']
-    date_hierarchy = 'dt'
-    ordering = ['-dt']
-    readonly_fields = [
-        'trading_system', 'timeframe', 'data_file', 'dt', 'open', 'high', 'low', 'close', 'volume', 'symbol', 'source_row'
-    ]
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def bartime(self, obj):
-        # Show bar time exactly as in source (stored in dt_server during import). No fallbacks.
-        if getattr(obj, 'dt_server', None):
-            try:
-                return obj.dt_server.strftime('%Y-%m-%d %H:%M:%S')
-            except Exception:
-                return str(obj.dt_server)
-        return '-'
-    bartime.short_description = 'BAR TIME'
-
-
-@admin.register(IndicatorDefinition)
-class IndicatorDefinitionAdmin(admin.ModelAdmin):
-    list_display = ['trading_system', 'name', 'dtype']
-    list_filter = ['trading_system', 'dtype']
-    search_fields = ['name', 'trading_system__system_sid']
-    ordering = ['trading_system', 'name']
-
-
-@admin.register(IndicatorValue)
-class IndicatorValueAdmin(admin.ModelAdmin):
-    list_display = ['bar', 'indicator', 'tf_level', 'value_int']
-    list_filter = ['indicator__trading_system', 'indicator', 'tf_level']
-    search_fields = ['indicator__name']
-    date_hierarchy = 'bar__dt'
-    readonly_fields = ['bar', 'indicator', 'tf_level', 'value_int']
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
+        self.message_user(request, 'Legacy file scan is disabled in global-feed mode.')
+    scan_selected_timeframes.short_description = 'Legacy scan (disabled)'
 
 @admin.register(SignalEvent)
 class SignalEventAdmin(admin.ModelAdmin):
-    list_display = ['event_time', 'direction', 'action', 'trading_system', 'timeframe', 'bar']
-    list_filter = ['trading_system', 'timeframe', 'direction', 'action']
+    list_display = ['event_time', 'direction', 'action', 'trading_system', 'level', 'feed', 'price_close', 'values_short']
+    list_filter = ['trading_system', 'level', 'feed', 'direction', 'action']
     search_fields = ['trading_system__system_sid']
     date_hierarchy = 'event_time'
     ordering = ['-event_time']
+    readonly_fields = ['ind_values']
+
+    def values_short(self, obj):
+        vals = obj.ind_values or {}
+        try:
+            items = list(vals.items()) if isinstance(vals, dict) else []
+            s = ', '.join(f"{k}={v}" for k, v in items[:4])
+            if len(items) > 4:
+                s += ' …'
+            return s or '-'
+        except Exception:
+            return '-'
+    values_short.short_description = 'Values'
+
+    def price_close(self, obj):
+        try:
+            feed_id = getattr(obj, 'feed_id', None)
+            if not feed_id:
+                lvl = getattr(obj, 'level', None)
+                ts = getattr(obj, 'trading_system', None)
+                if ts and lvl:
+                    b = TradingSystemTFBinding.objects.filter(trading_system=ts, level=int(lvl)).select_related('feed').first()
+                    if b:
+                        feed_id = b.feed_id
+            if feed_id:
+                mb = MarketBar.objects.filter(feed_id=feed_id, dt=obj.event_time).only('close').first()
+                if mb and mb.close is not None:
+                    return f"{float(mb.close):.5f}"
+        except Exception:
+            pass
+        return '-'
+    price_close.short_description = 'Price (Close)'
 
 
 @admin.register(SignalExecutionLog)
@@ -766,119 +724,6 @@ class SignalExecutionLogAdmin(admin.ModelAdmin):
         return (msg[:120] + '...') if len(msg) > 120 else msg
     short_message.short_description = 'Message'
 
-@admin.register(DataFile)
-class DataFileAdmin(admin.ModelAdmin):
-    """Админ панель для файлов данных"""
-    
-    list_display = [
-        'file_status_icon', 'filename', 'trading_system', 'timeframe',
-        'file_size_display', 'rows_processed', 'status', 'file_modified', 'processed_at'
-    ]
-    
-    list_filter = [
-        'status', 'trading_system', 'timeframe', 'created_at', 'processed_at'
-    ]
-    
-    search_fields = [
-        'filename', 'trading_system__system_sid', 'trading_system__name'
-    ]
-    
-    readonly_fields = [
-        'created_at', 'processed_at', 'json_preview'
-    ]
-    
-    fieldsets = (
-        ('Основная информация', {
-            'fields': ('trading_system', 'timeframe', 'filename', 'file_path')
-        }),
-        ('Файл', {
-            'fields': ('file_size', 'file_modified', 'status')
-        }),
-        ('Обработка', {
-            'fields': ('rows_processed', 'error_message', 'processed_at')
-        }),
-        ('JSON данные', {
-            'fields': ('json_preview',),
-            'classes': ('collapse',)
-        }),
-        ('Системная информация', {
-            'fields': ('created_at',),
-            'classes': ('collapse',)
-        }),
-    )
-    
-    actions = ['reprocess_files', 'mark_as_pending', 'import_to_db']
-    
-    def file_status_icon(self, obj):
-        status_colors = {
-            'pending': '#ffc107',      # yellow
-            'processing': '#007bff',   # blue
-            'completed': '#28a745',    # green
-            'error': '#dc3545',        # red
-            'skipped': '#6c757d',      # gray
-        }
-        color = status_colors.get(obj.status, '#6c757d')
-        return format_html(
-            '<span style="color: {}; font-size: 16px;">●</span>',
-            color
-        )
-    
-    file_status_icon.short_description = 'Статус'
-    
-    def file_size_display(self, obj):
-        if obj.file_size:
-            if obj.file_size < 1024:
-                return f"{obj.file_size} B"
-            elif obj.file_size < 1024 * 1024:
-                return f"{obj.file_size / 1024:.1f} KB"
-            else:
-                return f"{obj.file_size / (1024 * 1024):.1f} MB"
-        return "-"
-    
-    file_size_display.short_description = 'Размер'
-    
-    def json_preview(self, obj):
-        if obj.json_data:
-            import json
-            try:
-                formatted = json.dumps(obj.json_data, indent=2, ensure_ascii=False)
-                if len(formatted) > 2000:
-                    formatted = formatted[:2000] + "..."
-                return format_html('<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px;">{}</pre>', formatted)
-            except:
-                return "Ошибка форматирования JSON"
-        return "JSON данные отсутствуют"
-    
-    json_preview.short_description = 'Предпросмотр JSON'
-    
-    def import_to_db(self, request, queryset):
-        from .services.bar_importer import import_datafile
-        ok = 0
-        failed = 0
-        details = []
-        for df in queryset:
-            try:
-                res = import_datafile(df)
-                ok += 1
-                details.append(f"{df.filename}: bars={res.bars_created}, indVals={res.indicator_values_created}")
-            except Exception as e:
-                failed += 1
-                details.append(f"{df.filename}: ERROR {e}")
-        summary = f"Imported: {ok}, Failed: {failed}. " + (" | ".join(details[:3]) + (" …" if len(details) > 3 else ""))
-        self.message_user(request, summary)
-    import_to_db.short_description = 'Импортировать выбранные файлы в БД'
-
-    def reprocess_files(self, request, queryset):
-        updated = queryset.update(status='pending', error_message='', processed_at=None)
-        self.message_user(request, f'{updated} файлов помечены для повторной обработки.')
-    
-    reprocess_files.short_description = "Повторно обработать выбранные файлы"
-    
-    def mark_as_pending(self, request, queryset):
-        updated = queryset.update(status='pending')
-        self.message_user(request, f'{updated} файлов помечены как ожидающие обработки.')
-    
-    mark_as_pending.short_description = "Пометить как ожидающие"
 
 
 # Настройка заголовков админ панели
@@ -918,11 +763,85 @@ class MarketDataFileAdmin(admin.ModelAdmin):
     list_filter = ['provider', 'status', 'feed']
     search_fields = ['filename']
     readonly_fields = ['created_at', 'processed_at']
+    actions = ['scan_global_dir', 'import_all_pending', 'wipe_all_global', 'import_to_global']
+    change_list_template = 'admin/main/marketdatafile/change_list.html'
+
+    def import_to_global(self, request, queryset):
+        from .services.global_importer import import_market_datafile
+        ok = failed = 0
+        for mdf in queryset:
+            try:
+                import_market_datafile(mdf)
+                ok += 1
+            except Exception:
+                failed += 1
+        self.message_user(request, f"Imported to global feed → OK: {ok}, Failed: {failed}")
+    import_to_global.short_description = 'Import selected into Global Feed'
+
+    def scan_global_dir(self, request, queryset):
+        from .services.global_feed_collector import collect_global_dir
+        c, u, s = collect_global_dir()
+        self.message_user(request, f"Global scan: Created={c}, Updated={u}, Unchanged={s}")
+    scan_global_dir.short_description = 'Scan global TS_EXPORTS_DIR for files'
+
+    def import_all_pending(self, request, queryset):
+        from .services.global_importer import import_market_datafile
+        from .models import MarketDataFile
+        ok = failed = 0
+        for mdf in MarketDataFile.objects.filter(status='pending'):
+            try:
+                import_market_datafile(mdf); ok += 1
+            except Exception:
+                failed += 1
+        self.message_user(request, f"Imported all pending → OK: {ok}, Failed: {failed}")
+    import_all_pending.short_description = 'Import ALL pending files'
+
+    # --- Extra object-tool endpoints (no selection required) ---
+    def get_urls(self):
+        from django.urls import path
+        urls = super().get_urls()
+
+        def wrap(view):
+            return self.admin_site.admin_view(view)
+
+        return [
+            path('scan-global/', wrap(self._scan_global_view), name='main_marketdatafile_scan'),
+            path('import-all/', wrap(self._import_all_view), name='main_marketdatafile_import_all'),
+            path('wipe-all/', wrap(self._wipe_all_view), name='main_marketdatafile_wipe_all'),
+        ] + urls
+
+    def _scan_global_view(self, request):
+        self.scan_global_dir(request, queryset=None)
+        from django.shortcuts import redirect
+        return redirect('admin:main_marketdatafile_changelist')
+
+    def _import_all_view(self, request):
+        self.import_all_pending(request, queryset=None)
+        from django.shortcuts import redirect
+        return redirect('admin:main_marketdatafile_changelist')
+
+    def _wipe_all_view(self, request):
+        self.wipe_all_global(request, queryset=None)
+        from django.shortcuts import redirect
+        return redirect('admin:main_marketdatafile_changelist')
+
+    def wipe_all_global(self, request, queryset):
+        from django.db import transaction
+        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog
+        with transaction.atomic():
+            v = MarketIndicatorValue.objects.count(); MarketIndicatorValue.objects.all().delete()
+            b = MarketBar.objects.count(); MarketBar.objects.all().delete()
+            d = MarketIndicatorDef.objects.count(); MarketIndicatorDef.objects.all().delete()
+            e = SignalExecutionLog.objects.count(); SignalExecutionLog.objects.all().delete()
+            s = SignalEvent.objects.count(); SignalEvent.objects.all().delete()
+            MarketDataFile.objects.all().update(status='pending', processed_at=None)
+        self.message_user(request, f"Global wipe complete → Bars={b}, IndicatorValues={v}, IndicatorDefs={d}, Signals={s}, ExecLogs={e}. Files set to pending.")
+    wipe_all_global.short_description = 'Wipe ALL global market data (set files to pending)'
 
 
 @admin.register(MarketBar)
 class MarketBarAdmin(admin.ModelAdmin):
-    list_display = ['feed', 'dt', 'open', 'high', 'low', 'close', 'volume']
+    list_display = ['feed', 'dt', 'open', 'high', 'low', 'close', 'volume', 'created_at']
     list_filter = ['feed__provider', 'feed__instrument__symbol', 'feed__tfcode__code']
     date_hierarchy = 'dt'
     ordering = ['-dt']

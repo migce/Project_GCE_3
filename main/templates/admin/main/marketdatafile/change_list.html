@@ -1,0 +1,9 @@
+{% extends 'admin/change_list.html' %}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  <li><a href="{% url 'admin:main_marketdatafile_scan' %}" class="addlink">Scan global dir</a></li>
+  <li><a href="{% url 'admin:main_marketdatafile_import_all' %}" class="historylink">Import ALL pending</a></li>
+  <li><a href="{% url 'admin:main_marketdatafile_wipe_all' %}" class="deletelink">Wipe ALL global</a></li>
+{% endblock %}
+
