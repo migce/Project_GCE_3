@@ -127,6 +127,7 @@ TS_EXPORTS_DIR = os.environ.get('TS_EXPORTS_DIR', r'C:\\TS_EXPORTS')
 # Background services autostart
 AUTOSTART_INGESTION = True
 AUTOSTART_MT5_MONITORING = True
+DUAL_WRITE_GLOBAL_FEED = True
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

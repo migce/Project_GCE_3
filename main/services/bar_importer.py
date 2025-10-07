@@ -17,6 +17,14 @@ from ..models import (
     IndicatorDefinition,
     IndicatorValue,
 )
+from ..models import (
+    Instrument,
+    TFCode,
+    DataFeed,
+    MarketBar,
+    MarketIndicatorDef,
+    MarketIndicatorValue,
+)
 
 
 @dataclass
@@ -136,10 +144,30 @@ def import_datafile(data_file: DataFile) -> ImportResult:
             delimiter = ','
 
         reader = csv.DictReader(f, delimiter=delimiter)
-        # Normalize headers to lowercase for base columns
+        # Normalize headers and detect indicator columns strictly by position:
+        # take only columns AFTER the base price columns (o,h,l,c). Volume does not affect the split.
         headers = [h.strip() for h in reader.fieldnames or []]
-        base_set = set(h.lower() for h in headers)
-        indicator_cols = [h for h in headers if h.lower() not in KNOWN_BASE_COLUMNS]
+        lower = [h.lower() for h in headers]
+
+        def _idx(name: str) -> int:
+            try:
+                return lower.index(name.lower())
+            except ValueError:
+                return -1
+
+        # Prefer index of 'c' if present; otherwise fallback to max of o/h/l/c found
+        idx_c = _idx('c')
+        if idx_c >= 0:
+            last_base_idx = idx_c
+        else:
+            last_base_idx = max(_idx('o'), _idx('h'), _idx('l'))
+        if last_base_idx >= 0 and last_base_idx + 1 < len(headers):
+            tail = headers[last_base_idx + 1 :]
+            # Even in the tail, guard against reserved/base names accidentally placed later
+            indicator_cols = [h for h in tail if h and h.lower() not in KNOWN_BASE_COLUMNS]
+        else:
+            # Fallback to old behavior if base columns are not detected
+            indicator_cols = [h for h in headers if h.lower() not in KNOWN_BASE_COLUMNS]
 
         # Ensure indicators exist
         existing_defs = {
@@ -245,16 +273,28 @@ def import_datafile(data_file: DataFile) -> ImportResult:
                                 if ival is None:
                                     continue
                                 ind = existing_defs[col]
+                                # Ignore TF_Level from CSV; always bind to the timeframe level
                                 iv_buffer.append(IndicatorValue(
                                     bar=bar,
                                     indicator=ind,
                                     value_int=ival,
-                                    tf_level=int((row_buf.get('TF_Level') or row_buf.get('tf_level') or row_buf.get('TF_LEVEL') or timeframe.level or 0))
+                                    tf_level=int(timeframe.level or 0)
                                 ))
                     if iv_buffer:
                         IndicatorValue.objects.bulk_create(iv_buffer, batch_size=batch_size)
                         result.indicator_values_created += len(iv_buffer)
                         iv_buffer.clear()
+                    # Dual-write this batch to global feed layer (optional)
+                    try:
+                        from django.conf import settings as django_settings
+                        dual = getattr(django_settings, 'DUAL_WRITE_GLOBAL_FEED', True)
+                    except Exception:
+                        dual = True
+                    if dual:
+                        try:
+                            _dual_write_global_feed(system, timeframe, bar_buffer, rows_buffer, indicator_cols)
+                        except Exception:
+                            pass
                     # clear buffers only when we actually flushed a full batch
                     bar_buffer.clear()
                     rows_buffer.clear()
@@ -283,15 +323,30 @@ def import_datafile(data_file: DataFile) -> ImportResult:
                         if ival is None:
                             continue
                         ind = existing_defs[col]
+                        # Ignore TF_Level from CSV; always bind to the timeframe level
                         iv_buffer.append(IndicatorValue(
                             bar=bar,
                             indicator=ind,
                             value_int=ival,
-                            tf_level=int((row_buf.get('TF_Level') or row_buf.get('tf_level') or row_buf.get('TF_LEVEL') or timeframe.level or 0))
+                            tf_level=int(timeframe.level or 0)
                         ))
                 if iv_buffer:
                     IndicatorValue.objects.bulk_create(iv_buffer, batch_size=batch_size)
                     result.indicator_values_created += len(iv_buffer)
+
+        # Dual-write to global feed layer (optional)
+        try:
+            from django.conf import settings as django_settings
+            dual = getattr(django_settings, 'DUAL_WRITE_GLOBAL_FEED', True)
+        except Exception:
+            dual = True
+
+        if dual:
+            try:
+                _dual_write_global_feed(system, timeframe, bar_buffer, rows_buffer, indicator_cols)
+            except Exception:
+                # Do not fail legacy import on dual write issues
+                pass
 
         # finalize DataFile status in its own short transaction
         with transaction.atomic():
@@ -301,6 +356,91 @@ def import_datafile(data_file: DataFile) -> ImportResult:
             data_file.save(update_fields=['status', 'rows_processed', 'processed_at'])
 
     return result
+
+
+# -----------------------------
+# Global feed dual-write helpers
+# -----------------------------
+
+def _tf_minutes(code: str) -> int:
+    m = {
+        'M1': 1, 'M2': 2, 'M5': 5, 'M15': 15, 'M30': 30,
+        'H1': 60, 'H4': 240, 'D1': 1440, 'W1': 10080, 'MN1': 43200,
+    }
+    return m.get(code.upper(), 1)
+
+
+def _get_feed(symbol: str, tf_code: str, provider: str = 'TS') -> DataFeed:
+    inst, _ = Instrument.objects.get_or_create(symbol=symbol)
+    tf, _ = TFCode.objects.get_or_create(code=tf_code, defaults={'minutes': _tf_minutes(tf_code)})
+    feed, _ = DataFeed.objects.get_or_create(provider=provider, instrument=inst, tfcode=tf)
+    return feed
+
+
+def _ensure_global_indicator_defs(feed: DataFeed, names: list[str]) -> dict[str, MarketIndicatorDef]:
+    existing = {d.name: d for d in MarketIndicatorDef.objects.filter(feed=feed, name__in=names)}
+    to_create = [MarketIndicatorDef(feed=feed, name=n, dtype='numeric') for n in names if n not in existing]
+    if to_create:
+        MarketIndicatorDef.objects.bulk_create(to_create, ignore_conflicts=True)
+        existing.update({d.name: d for d in MarketIndicatorDef.objects.filter(feed=feed, name__in=names)})
+    return existing
+
+
+def _dual_write_global_feed(system: TradingSystem, timeframe: TimeFrame, bar_buffer: list[Bar], rows_buffer: list[dict[str, str]], indicator_cols: list[str]) -> None:
+    # Resolve feed by system symbol and timeframe code
+    symbol = (system.symbol or 'EURUSD') if hasattr(system, 'symbol') else 'EURUSD'
+    tf_code = timeframe.timeframe if hasattr(timeframe, 'timeframe') else 'M1'
+    feed = _get_feed(symbol, tf_code)
+
+    # Build MarketBar batch
+    mb_batch: list[MarketBar] = []
+    for b in bar_buffer:
+        mb_batch.append(MarketBar(
+            feed=feed,
+            dt=b.dt,
+            dt_server=getattr(b, 'dt_server', None),
+            open=b.open,
+            high=b.high,
+            low=b.low,
+            close=b.close,
+            volume=b.volume if hasattr(b, 'volume') else None,
+        ))
+
+    if mb_batch:
+        MarketBar.objects.bulk_create(mb_batch, ignore_conflicts=True, batch_size=2000)
+
+    # Map dt -> MarketBar for indicator linking
+    dts = [b.dt for b in bar_buffer]
+    bar_map = {b.dt: b for b in MarketBar.objects.filter(feed=feed, dt__in=dts)}
+
+    # Ensure indicator defs
+    defs = _ensure_global_indicator_defs(feed, indicator_cols)
+
+    # Build indicator values
+    iv_batch: list[MarketIndicatorValue] = []
+    for row in rows_buffer:
+        try:
+            local_dt = _parse_local_datetime(
+                (row.get('bar_date') or row.get('BAR_DATE') or ''),
+                (row.get('bar_time_hhmm') or row.get('BAR_TIME_HHMM') or '')
+            )
+            dt_val = timezone.make_aware(local_dt, dt_timezone.utc)
+        except Exception:
+            continue
+        bar = bar_map.get(dt_val)
+        if not bar:
+            continue
+        for col in indicator_cols:
+            ival = _to_int(row.get(col))
+            if ival is None:
+                continue
+            ind = defs.get(col)
+            if not ind:
+                continue
+            iv_batch.append(MarketIndicatorValue(bar=bar, indicator=ind, value_int=ival))
+
+    if iv_batch:
+        MarketIndicatorValue.objects.bulk_create(iv_batch, ignore_conflicts=True, batch_size=2000)
 
 
 

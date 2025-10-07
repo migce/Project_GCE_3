@@ -19,6 +19,10 @@ from .models import (
     SignalEvent,
     SignalExecutionLog,
 )
+from .models import (
+    Instrument, TFCode, DataFeed, MarketBar, MarketIndicatorDef, MarketIndicatorValue, MarketDataFile,
+    TradingSystemTFBinding,
+)
 
 # Register your models here.
 
@@ -387,7 +391,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
         verbose_name = 'Signal Logic'
         verbose_name_plural = 'Signal Logic'
         readonly_fields = ['indicators_available']
-        fields = ('signal_logic', 'signal_base_tf_level', 'signal_indicators', 'indicators_available')
+        fields = ('signal_logic', 'signal_base_tf_level', 'use_global_feed', 'signal_indicators', 'indicators_available')
 
         def get_formset(self, request, obj=None, **kwargs):
             # Keep a reference to parent TradingSystem for readonly field rendering when obj is not yet saved
@@ -405,7 +409,36 @@ class TradingSystemAdmin(admin.ModelAdmin):
             if ts is None:
                 return 'Save Trading System first to see indicators.'
 
-            # Collect indicators for this system and distinct TF levels observed in data
+            # If using global feed, collect per-binding names from MarketIndicatorDef
+            try:
+                use_global = bool(getattr(obj, 'use_global_feed', False))
+            except Exception:
+                use_global = False
+            if use_global:
+                from .models import TradingSystemTFBinding, MarketIndicatorDef
+                bindings = list(TradingSystemTFBinding.objects.filter(trading_system=ts).select_related('feed'))
+                if not bindings:
+                    return 'No TF bindings yet. Add bindings to see indicators.'
+                levels_map = {}
+                all_names = set()
+                for b in bindings:
+                    names = list(MarketIndicatorDef.objects.filter(feed=b.feed)
+                                 .values_list('name', flat=True).order_by('name').distinct())
+                    for n in names:
+                        levels_map.setdefault(n, set()).add(int(b.level))
+                    all_names.update(names)
+                if not all_names:
+                    return 'No indicators detected yet in global feed. Import data or verify bindings.'
+                lines = []
+                for name in sorted(all_names):
+                    lvls = sorted(levels_map.get(name, []))
+                    lvls_str = ', '.join(f'L{v}' for v in lvls) if lvls else '-'
+                    lines.append(f"{name}: {lvls_str}")
+                html = '<pre style="white-space: pre-wrap; background:#f8f9fa; padding:8px; border-radius:4px; max-height:240px; overflow:auto;">' \
+                       + '\n'.join(lines) + '</pre>'
+                return format_html(html)
+
+            # Legacy per-system collection
             names = list(IndicatorDefinition.objects.filter(trading_system=ts)
                         .values_list('name', flat=True).order_by('name').distinct())
             rows = IndicatorValue.objects.filter(indicator__trading_system=ts)
@@ -430,7 +463,13 @@ class TradingSystemAdmin(admin.ModelAdmin):
             return format_html(html)
         indicators_available.short_description = 'Available Indicators (by TF levels)'
 
-    inlines = [TimeFrameInline, SignalSettingsInline]
+    class TFBindingInline(admin.TabularInline):
+        model = TradingSystemTFBinding
+        extra = 0
+        fields = ['level', 'feed']
+        ordering = ['level']
+
+    inlines = [TimeFrameInline, TFBindingInline, SignalSettingsInline]
     actions = ['scan_data_files', 'import_pending_files', 'wipe_market_data', 'generate_signals_now']
     
     def system_status_icon(self, obj):
@@ -561,7 +600,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     def generate_signals_now(self, request, queryset):
         """Manually run signal generation for selected systems and save events."""
         from django.db import transaction
-        from .services.signal_engine import generate_signals_for_system
+        from .services.signal_engine import generate_signals_for_system, diagnose_system_for_signals
 
         total_saved = 0
         details = []
@@ -569,7 +608,9 @@ class TradingSystemAdmin(admin.ModelAdmin):
             try:
                 events = generate_signals_for_system(system, limit_bars=1000)
                 if not events:
-                    details.append(f"{system.system_sid}: no signals")
+                    diag = diagnose_system_for_signals(system, limit_bars=200)
+                    hint = ("; ".join(diag[:2]) + (" …" if len(diag) > 2 else "")) if diag else "no details"
+                    details.append(f"{system.system_sid}: no signals ({hint})")
                     continue
                 saved = 0
                 with transaction.atomic():
@@ -844,6 +885,60 @@ class DataFileAdmin(admin.ModelAdmin):
 admin.site.site_header = "Project GCE 3 - Админ панель"
 admin.site.site_title = "Project GCE 3"
 admin.site.index_title = "Управление MT5 & Торговыми системами"
+
+
+# ============================================================================
+# Global feed admin
+# ============================================================================
+
+@admin.register(Instrument)
+class InstrumentAdmin(admin.ModelAdmin):
+    list_display = ['symbol', 'name', 'is_active']
+    search_fields = ['symbol', 'name']
+    list_filter = ['is_active']
+
+
+@admin.register(TFCode)
+class TFCodeAdmin(admin.ModelAdmin):
+    list_display = ['code', 'minutes', 'is_active']
+    list_editable = ['minutes', 'is_active']
+    search_fields = ['code']
+
+
+@admin.register(DataFeed)
+class DataFeedAdmin(admin.ModelAdmin):
+    list_display = ['provider', 'instrument', 'tfcode', 'is_active']
+    list_filter = ['provider', 'tfcode__code', 'is_active']
+    search_fields = ['instrument__symbol']
+
+
+@admin.register(MarketDataFile)
+class MarketDataFileAdmin(admin.ModelAdmin):
+    list_display = ['provider', 'filename', 'feed', 'file_size', 'file_modified', 'status', 'processed_at']
+    list_filter = ['provider', 'status', 'feed']
+    search_fields = ['filename']
+    readonly_fields = ['created_at', 'processed_at']
+
+
+@admin.register(MarketBar)
+class MarketBarAdmin(admin.ModelAdmin):
+    list_display = ['feed', 'dt', 'open', 'high', 'low', 'close', 'volume']
+    list_filter = ['feed__provider', 'feed__instrument__symbol', 'feed__tfcode__code']
+    date_hierarchy = 'dt'
+    ordering = ['-dt']
+
+
+@admin.register(MarketIndicatorDef)
+class MarketIndicatorDefAdmin(admin.ModelAdmin):
+    list_display = ['feed', 'name', 'dtype']
+    list_filter = ['feed', 'dtype']
+    search_fields = ['name']
+
+
+@admin.register(MarketIndicatorValue)
+class MarketIndicatorValueAdmin(admin.ModelAdmin):
+    list_display = ['indicator', 'bar', 'value_int']
+    list_filter = ['indicator__feed', 'indicator__name']
 
 
 

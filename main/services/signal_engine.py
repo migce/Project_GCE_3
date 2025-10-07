@@ -14,6 +14,13 @@ from ..models import (
     TradingSystemSignalSettings,
     SignalEvent,
 )
+from ..models import (
+    DataFeed,
+    MarketBar,
+    MarketIndicatorDef,
+    MarketIndicatorValue,
+    TradingSystemTFBinding,
+)
 
 
 # -----------------------------
@@ -213,7 +220,10 @@ def parse_factor(lx: Lexer):
         return node
     # function or comparison atom
     # changed(
-    if lx.take('CHANGED') and lx._peek() == '(':
+    if lx.take('CHANGED'):
+        lx._skip_ws()
+        if lx._peek() != '(':
+            raise ParseError('Expected ( after CHANGED')
         lx._advance(1)
         ref = parse_value(lx)
         lx._skip_ws()
@@ -223,7 +233,10 @@ def parse_factor(lx: Lexer):
         # changed(x) => prev(x) != x
         return Compare(IndicatorRef(ref.name, ref.level, max(ref.lag, 1)), '!=', IndicatorRef(ref.name, ref.level, 0))
     # prev(x[,n])
-    if lx.take('PREV') and lx._peek() == '(':
+    if lx.take('PREV'):
+        lx._skip_ws()
+        if lx._peek() != '(':
+            raise ParseError('Expected ( after PREV')
         lx._advance(1)
         ref = parse_value(lx)
         lag = 1
@@ -365,7 +378,11 @@ def _eval(node, env_get):
 
 
 def generate_signals_for_system(system: TradingSystem, limit_bars: int = 500) -> List[SignalEvent]:
-    """Parse system rules and generate SignalEvent objects (not saved) for last N bars on base TF."""
+    """Parse system rules and generate SignalEvent objects (not saved) for last N bars.
+
+    If system.signal_settings.use_global_feed is True, reads series from global feed layer using
+    TradingSystemTFBinding for TF level routing; otherwise uses legacy per-system Bar/Indicator tables.
+    """
     # Load settings
     try:
         settings = system.signal_settings
@@ -373,6 +390,9 @@ def generate_signals_for_system(system: TradingSystem, limit_bars: int = 500) ->
         return []
     if not settings.signal_logic:
         return []
+
+    if getattr(settings, 'use_global_feed', False):
+        return _generate_signals_global(system, settings, limit_bars)
 
     rules = parse_rules(settings.signal_logic)
 
@@ -489,3 +509,222 @@ def generate_signals_for_system(system: TradingSystem, limit_bars: int = 500) ->
                         action=act_kind,
                     ))
     return events
+
+
+def diagnose_system_for_signals(system: TradingSystem, limit_bars: int = 500) -> List[str]:
+    """Return human-readable diagnostics explaining why signals may not be produced.
+
+    This does not raise; it gives actionable hints (missing bindings, no bars, missing indicators, etc.).
+    """
+    msgs: List[str] = []
+    try:
+        settings = system.signal_settings
+    except TradingSystemSignalSettings.DoesNotExist:
+        return ["Signal settings not configured"]
+    if not (settings.signal_logic or '').strip():
+        msgs.append('Empty signal_logic')
+        return msgs
+
+    try:
+        rules = parse_rules(settings.signal_logic)
+    except Exception as e:
+        msgs.append(f'Rule parse error: {e}')
+        return msgs
+
+    req = _collect_requirements(rules)
+    base_level = settings.signal_base_tf_level or 1
+
+    if getattr(settings, 'use_global_feed', False):
+        # Global feed diagnostics
+        base_binding = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+        if not base_binding:
+            return [f'No TF binding for base level L{base_level}']
+        base_feed = base_binding.feed
+        base_bar_cnt = MarketBar.objects.filter(feed=base_feed).count()
+        if base_bar_cnt == 0:
+            msgs.append(f'No MarketBar for base feed {base_feed}')
+        names = sorted({name for name, _ in req})
+        # Check presence of indicator defs per referenced level
+        missing_defs: List[str] = []
+        for name, lvl in req:
+            the_level = lvl or base_level
+            bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=the_level).select_related('feed').first()
+            if not bind:
+                msgs.append(f'No TF binding for L{the_level} (needed by {name})')
+                continue
+            if not MarketIndicatorDef.objects.filter(feed=bind.feed, name=name).exists():
+                missing_defs.append(f'{name}@L{the_level} (feed {bind.feed})')
+        if missing_defs:
+            msgs.append('Missing indicator defs: ' + ', '.join(missing_defs[:6]) + (' …' if len(missing_defs) > 6 else ''))
+        # Check base series values in window
+        bars_desc = list(MarketBar.objects.filter(feed=base_feed).order_by('-dt')[:limit_bars])
+        bars = list(reversed(bars_desc))
+        if bars:
+            dts = [b.dt for b in bars]
+            base_names = [n for (n, lvl) in req if (lvl or base_level) == base_level]
+            if base_names:
+                defs = list(MarketIndicatorDef.objects.filter(feed=base_feed, name__in=base_names))
+                val_cnt = MarketIndicatorValue.objects.filter(indicator__in=defs, bar__dt__in=dts).count()
+                if val_cnt == 0:
+                    msgs.append('No indicator values for base feed in the evaluated window')
+        return msgs or ['No rule condition matched in the evaluated window']
+    else:
+        # Legacy diagnostics
+        base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+        if not base_tf:
+            return [f'No TimeFrame with level L{base_level}']
+        bar_cnt = Bar.objects.filter(timeframe=base_tf).count()
+        if bar_cnt == 0:
+            msgs.append('No Bars on base timeframe')
+        names = sorted({name for name, _ in req})
+        missing_defs: List[str] = []
+        for name in names:
+            if not IndicatorDefinition.objects.filter(trading_system=system, name=name).exists():
+                missing_defs.append(name)
+        if missing_defs:
+            msgs.append('Missing indicator defs: ' + ', '.join(missing_defs[:6]) + (' …' if len(missing_defs) > 6 else ''))
+        return msgs or ['No rule condition matched in the evaluated window']
+
+
+def _generate_signals_global(system: TradingSystem, settings: TradingSystemSignalSettings, limit_bars: int) -> List[SignalEvent]:
+    """Global-feed backed signal generation."""
+    try:
+        rules = parse_rules(settings.signal_logic)
+    except ParseError:
+        return []
+
+    base_level = settings.signal_base_tf_level or 1
+    base_binding = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed__tfcode', 'feed__instrument').first()
+    if not base_binding:
+        return []
+    base_feed = base_binding.feed
+
+    # Collect requirements
+    req = _collect_requirements(rules)
+    normalized_req: Set[Tuple[str, int]] = set()
+    for name, lvl in req:
+        normalized_req.add((name, (lvl or base_level)))
+    names = sorted({name for name, _ in normalized_req})
+
+    # Load last N base bars from MarketBar
+    bars_desc = list(MarketBar.objects.filter(feed=base_feed).order_by('-dt')[:limit_bars])
+    bars = list(reversed(bars_desc))
+    if not bars:
+        return []
+
+    def btime_mb(b: MarketBar):
+        return getattr(b, 'dt_server', None) or b.dt
+
+    bar_times = [btime_mb(b) for b in bars]
+
+    # Prepare cursor series for non-base levels
+    # Map TF level -> feed
+    feed_by_level: Dict[int, DataFeed] = {}
+    for _, lvl in normalized_req:
+        if lvl == base_level:
+            continue
+        if lvl not in feed_by_level:
+            b = TradingSystemTFBinding.objects.filter(trading_system=system, level=lvl).select_related('feed').first()
+            if not b:
+                # requirement references unbound level; skip entire run
+                return []
+            feed_by_level[lvl] = b.feed
+
+    # Indicator definitions per feed
+    defs_per_feed: Dict[Tuple[DataFeed, str], MarketIndicatorDef] = {}
+    for name, lvl in normalized_req:
+        f = base_feed if lvl == base_level else feed_by_level.get(lvl)
+        if not f:
+            return []
+        d = MarketIndicatorDef.objects.filter(feed=f, name=name).first()
+        if d:
+            defs_per_feed[(f, name)] = d
+    if not defs_per_feed:
+        return []
+
+    # Build series for non-base levels
+    series: Dict[Tuple[str, int], SeriesCursor] = {}
+    for name, lvl in normalized_req:
+        if lvl == base_level:
+            continue
+        f = feed_by_level.get(lvl)
+        ind = defs_per_feed.get((f, name)) if f else None
+        if not ind:
+            continue
+        qs = MarketIndicatorValue.objects.filter(indicator=ind).select_related('bar').order_by('bar__dt')
+        times = [(getattr(iv.bar, 'dt_server', None) or iv.bar.dt) for iv in qs]
+        vals = [iv.value_int for iv in qs]
+        series[(name, lvl)] = SeriesCursor(times, vals)
+
+    # Base series values over our base bars window
+    base_defs = {name: defs_per_feed.get((base_feed, name)) for name in names}
+    base_map: Dict[int, Dict[str, Optional[int]]] = {}
+    qs_base = MarketIndicatorValue.objects.filter(
+        indicator__in=[d for d in base_defs.values() if d],
+        bar__in=[b.id for b in bars],
+    ).select_related('bar', 'indicator').order_by('bar__dt')
+    for iv in qs_base:
+        base_map.setdefault(iv.bar_id, {})[iv.indicator.name] = iv.value_int
+    base_hist: Dict[str, List[Optional[int]]] = {n: [] for n in names}
+
+    # Resolve TimeFrame for events (base level)
+    base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+
+    # Optionally map MarketBar.dt to local Bar for event.bar
+    # Build local bar map by dt if timeframe available
+    local_bar_map: Dict[Any, Bar] = {}
+    if base_tf:
+        dts = [b.dt for b in bars]
+        for lb in Bar.objects.filter(timeframe=base_tf, dt__in=dts):
+            local_bar_map[lb.dt] = lb
+
+    events: List[SignalEvent] = []
+    for mb in bars:
+        tnow = btime_mb(mb)
+        for cur in series.values():
+            cur.advance_to(tnow)
+        curvals = base_map.get(mb.id, {})
+        for n in names:
+            base_hist[n].append(curvals.get(n))
+
+        for r in rules:
+            ok = bool(_eval(r.condition, lambda name, level, lag: _env_get_global(name, level, lag, base_hist, base_level, series)))
+            actions = r.action_then if ok else (r.action_else or [])
+            for action in actions:
+                if action in ('BUY', 'SELL', 'CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE_BUY', 'CLOSE_SELL', 'EXIT_LONG', 'EXIT_SHORT'):
+                    if action in ('BUY', 'SELL'):
+                        direction = action
+                        act_kind = 'OPEN'
+                    elif action in ('CLOSE_LONG', 'CLOSE_BUY', 'EXIT_LONG'):
+                        direction = 'BUY'
+                        act_kind = 'CLOSE'
+                    else:
+                        direction = 'SELL'
+                        act_kind = 'CLOSE'
+                    ev_bar = local_bar_map.get(mb.dt) if local_bar_map else None
+                    events.append(SignalEvent(
+                        trading_system=system,
+                        timeframe=base_tf if base_tf else TimeFrame.objects.filter(trading_system=system, level=base_level).first(),
+                        bar=ev_bar,
+                        direction=direction,
+                        rule_text=str(r),
+                        event_time=btime_mb(mb),
+                        action=act_kind,
+                    ))
+    return events
+
+
+def _env_get_global(name: str, level: Optional[int], lag: int, base_hist: Dict[str, List[Optional[int]]], base_level: int, series: Dict[Tuple[str, int], SeriesCursor]) -> Optional[int]:
+    lvl = level or base_level
+    if lvl == base_level:
+        hist = base_hist.get(name)
+        if hist is None:
+            return None
+        i = len(hist) - 1 - lag
+        if i < 0 or i >= len(hist):
+            return None
+        return hist[i]
+    cur = series.get((name, lvl))
+    if not cur:
+        return None
+    return cur.value(lag)
