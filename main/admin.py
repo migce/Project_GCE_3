@@ -339,7 +339,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     
     list_display = [
         'system_status_icon', 'system_sid', 'name', 'symbol', 'magic_number', 'magic_number', 
-        'timeframes_count', 'time_offset_minutes', 'is_active', 'trading_enabled', 'lot_size',
+        'timeframes_count', 'time_offset_minutes', 'is_active', 'trading_enabled', 'is_sar', 'lot_size',
         'files_count', 'created_at'
     ]
     
@@ -352,7 +352,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     ]
     
     list_editable = [
-        'is_active', 'trading_enabled', 'lot_size'
+        'is_active', 'trading_enabled', 'is_sar', 'lot_size'
     ]
     
     readonly_fields = [
@@ -364,7 +364,10 @@ class TradingSystemAdmin(admin.ModelAdmin):
             'fields': ('system_sid', 'name', 'symbol')
         }),
         ('Конфигурация', {
-            'fields': ('timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number', 'is_active')
+            'fields': (
+                'timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number',
+                'is_active', 'trading_enabled', 'is_sar', 'lot_size'
+            )
         }),
         ('Дополнительно', {
             'fields': ('description',),

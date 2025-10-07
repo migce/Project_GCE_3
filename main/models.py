@@ -391,6 +391,11 @@ class TradingSystem(models.Model):
         verbose_name='Allow Trading',
         help_text='If enabled, signals may execute real trades for this system'
     )
+    is_sar = models.BooleanField(
+        default=True,
+        verbose_name='SAR (Stop & Reverse)',
+        help_text='If enabled, OPEN signals reverse the position (close opposite side)'
+    )
     lot_size = models.DecimalField(
         max_digits=10,
         decimal_places=2,

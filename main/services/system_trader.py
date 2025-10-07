@@ -72,20 +72,31 @@ class SystemTrader:
             lot = float(sys.lot_size or 0.01)
             magic = getattr(sys, 'magic_number', None)
             if sig.action == 'OPEN':
+                # Stop & Reverse behavior (optional)
+                sar = getattr(sys, 'is_sar', True)
                 if sig.direction == 'BUY':
-                    self._close_side(svc, sys, 'SELL')
+                    if sar:
+                        self._close_side(svc, sys, 'SELL')
+                    # In non-SAR mode, do not auto-close opposite; skip OPEN if opposite exists
                     if self._has_side(svc, sys, 'BUY'):
                         ok = True
                         msg = 'BUY already open, skipped'
+                    elif not sar and self._has_side(svc, sys, 'SELL'):
+                        ok = True
+                        msg = 'SELL open, skip BUY (non-SAR)'
                     else:
                         res = svc.market_buy(symbol, lot, magic=magic, comment=f'{sys.system_sid} BUY')
                         ok = bool(res.get('success'))
                         msg = res.get('message', '')
                 else:
-                    self._close_side(svc, sys, 'BUY')
+                    if sar:
+                        self._close_side(svc, sys, 'BUY')
                     if self._has_side(svc, sys, 'SELL'):
                         ok = True
                         msg = 'SELL already open, skipped'
+                    elif not sar and self._has_side(svc, sys, 'BUY'):
+                        ok = True
+                        msg = 'BUY open, skip SELL (non-SAR)'
                     else:
                         res = svc.market_sell(symbol, lot, magic=magic, comment=f'{sys.system_sid} SELL')
                         ok = bool(res.get('success'))
