@@ -1,0 +1,131 @@
+
+class TimeFrameInline(admin.TabularInline):
+    """Inline для управления таймфреймами в торговой системе"""
+    model = TimeFrame
+    extra = 1
+    fields = ['timeframe', 'level', 'is_active']
+    ordering = ['level']
+
+
+@admin.register(TradingSystem)
+class TradingSystemAdmin(admin.ModelAdmin):
+    """Админ панель для торговых систем"""
+    
+    list_display = [
+        'system_status_icon', 'system_sid', 'name', 'symbol', 'magic_number', 'magic_number', 
+        'timeframes_count', 'time_offset_minutes', 'is_active', 'trading_enabled', 'is_sar', 'lot_size',
+        'created_at'
+    ]
+    
+    list_filter = [
+        'is_active', 'symbol', 'timeframes_count', 'created_at'
+    ]
+    
+    search_fields = [
+        'system_sid', 'name', 'symbol', 'description'
+    ]
+    
+    list_editable = [
+        'is_active', 'trading_enabled', 'is_sar', 'lot_size'
+    ]
+    
+    readonly_fields = [
+        'created_at', 'updated_at', 'expected_files_info', 'file_pattern_info'
+    ]
+    
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('system_sid', 'name', 'symbol')
+        }),
+        ('Конфигурация', {
+            'fields': (
+                'timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number',
+                'is_active', 'trading_enabled', 'is_sar', 'lot_size'
+            )
+        }),
+        ('Дополнительно', {
+            'fields': ('description',),
+            'classes': ('collapse',)
+        }),
+        ('Системная информация', {
+            'fields': ('expected_files_info', 'file_pattern_info', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    class SignalSettingsInline(admin.StackedInline):
+        model = TradingSystemSignalSettings
+        extra = 0
+        max_num = 1
+        can_delete = True
+        verbose_name = 'Signal Logic'
+        verbose_name_plural = 'Signal Logic'
+        readonly_fields = ['indicators_available']
+        fields = ('signal_logic', 'signal_base_tf_level', 'signal_indicators', 'indicators_available')
+
+        def get_formset(self, request, obj=None, **kwargs):
+            # Keep a reference to parent TradingSystem for readonly field rendering when obj is not yet saved
+            self._parent_ts = obj
+            return super().get_formset(request, obj, **kwargs)
+
+        def indicators_available(self, obj):
+            from django.utils.html import format_html
+            # Determine trading system
+            ts = None
+            if obj and getattr(obj, 'trading_system_id', None):
+                ts = obj.trading_system
+            elif hasattr(self, '_parent_ts') and self._parent_ts is not None:
+                ts = self._parent_ts
+            if ts is None:
+                return 'Save Trading System first to see indicators.'
+
+            # Always read from global feed
+            from .models import TradingSystemTFBinding, MarketIndicatorDef
+            bindings = list(TradingSystemTFBinding.objects.filter(trading_system=ts).select_related('feed'))
+            if not bindings:
+                return 'No TF bindings yet. Add bindings to see indicators.'
+            levels_map = {}
+            all_names = set()
+            for b in bindings:
+                names = list(MarketIndicatorDef.objects.filter(feed=b.feed)
+                             .values_list('name', flat=True).order_by('name').distinct())
+                for n in names:
+                    levels_map.setdefault(n, set()).add(int(b.level))
+                all_names.update(names)
+            if not all_names:
+                return 'No indicators detected yet in global feed. Import data or verify bindings.'
+            lines = []
+            for name in sorted(all_names):
+                lvls = sorted(levels_map.get(name, []))
+                lvls_str = ', '.join(f'L{v}' for v in lvls) if lvls else '-'
+                lines.append(f"{name}: {lvls_str}")
+            html = '<pre style="white-space: pre-wrap; background:#f8f9fa; padding:8px; border-radius:4px; max-height:240px; overflow:auto;">' \
+                   + '\n'.join(lines) + '</pre>'
+            return format_html(html)
+        indicators_available.short_description = 'Available Indicators (by TF levels)'
+
+    class TFBindingInline(admin.TabularInline):
+        model = TradingSystemTFBinding
+        extra = 0
+        fields = ['level', 'feed']
+        ordering = ['level']
+
+    inlines = [TimeFrameInline, TFBindingInline, SignalSettingsInline]
+    actions = ['scan_global_files', 'import_global_pending', 'wipe_global_market_data', 'reset_and_reimport', 'generate_signals_now']
+    
+    def system_status_icon(self, obj):
+        if obj.is_active:
+            return format_html(
+                '<span style="color: green; font-size: 16px;">●</span>'
+            )
+        else:
+            return format_html(
+                '<span style="color: red; font-size: 16px;">●</span>'
+            )
+    
+    system_status_icon.short_description = 'Статус'
+    
+    def files_count(self, obj):
+        count = obj.data_files.count()
+        if count > 0:
+            return format_html(

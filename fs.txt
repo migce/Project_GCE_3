@@ -1,0 +1,81 @@
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('name', 'notes')
+        }),
+        ('Настройки терминала', {
+            'fields': ('terminal_path', 'portable'),
+            'classes': ('collapse',)
+        }),
+        ('Настройки подключения', {
+            'fields': ('server', 'login', 'password', 'timeout')
+        }),
+        ('Управление', {
+            'fields': ('is_active', 'is_default')
+        }),
+        ('Метаданные', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = ['make_default', 'activate_settings', 'deactivate_settings']
+    
+    def status_icon(self, obj):
+        """Иконка статуса"""
+        if obj.is_active:
+            icon = "🟢"
+            color = "green"
+        else:
+            icon = "🔴"
+            color = "red"
+        
+        default_mark = " 🌟" if obj.is_default else ""
+        
+        return format_html(
+            '<span style="color: {};">{}</span>{}',
+            color, icon, default_mark
+        )
+    status_icon.short_description = "Статус"
+    
+    def make_default(self, request, queryset):
+        """Действие: сделать настройкой по умолчанию"""
+        if queryset.count() > 1:
+            self.message_user(
+                request, 
+                "Можно выбрать только одну настройку", 
+                level='ERROR'
+            )
+            return
+        
+        # Сначала убираем флаг у всех
+        MT5ConnectionSettings.objects.update(is_default=False)
+        # Затем устанавливаем для выбранной
+        queryset.update(is_default=True, is_active=True)
+        
+        self.message_user(
+            request, 
+            f"Настройка '{queryset.first().name}' установлена по умолчанию"
+        )
+    make_default.short_description = "Сделать настройкой по умолчанию"
+    
+    def activate_settings(self, request, queryset):
+        """Действие: активировать настройки"""
+        count = queryset.update(is_active=True)
+        self.message_user(
+            request, 
+            f"Активировано настроек: {count}"
+        )
+    activate_settings.short_description = "Активировать выбранные настройки"
+    
+    def deactivate_settings(self, request, queryset):
+        """Действие: деактивировать настройки"""
+        count = queryset.update(is_active=False, is_default=False)
+        self.message_user(
+            request, 
+            f"Деактивировано настроек: {count}"
+        )
+    deactivate_settings.short_description = "Деактивировать выбранные настройки"
+
+
+@admin.register(MT5ConnectionLog)
+class MT5ConnectionLogAdmin(admin.ModelAdmin):

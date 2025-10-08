@@ -1,0 +1,66 @@
+    s_all = s_buy = s_sell = 0.0
+    for t in trades:
+        p = float(t.get('pips') or 0.0)
+        s_all += p; vals_all.append(s_all)
+        if t.get('open_dir') == 'BUY':
+            s_buy += p
+        if t.get('open_dir') == 'SELL':
+            s_sell += p
+        vals_buy.append(s_buy)
+        vals_sell.append(s_sell)
+
+    def _spark(values, overlay_last=None, width=120, height=30, pad=2):
+        if not values:
+            return {'w': width, 'h': height, 'path': '', 'overlay': '', 'zero_y': height - pad}
+        n = len(values)
+        if n == 1:
+            values = [0.0, values[0]]; n = 2
+        vmin = min(values)
+        vmax = max(values)
+        if overlay_last is not None:
+            vmin = min(vmin, overlay_last)
+            vmax = max(vmax, overlay_last)
+        if vmin == vmax:
+            vmin -= 1.0; vmax += 1.0
+        sx = (width - 2*pad) / (n - 1)
+        sy = (height - 2*pad) / (vmax - vmin)
+        parts = []
+        for i, v in enumerate(values):
+            x = pad + i * sx
+            y = height - pad - (v - vmin) * sy
+            parts.append(f"{'M' if i==0 else 'L'}{x:.1f},{y:.1f}")
+        # zero line position
+        y0 = height - pad - (0 - vmin) * sy
+        # overlay as dashed segment from last point to synthetic point n
+        overlay_path = ''
+        if overlay_last is not None:
+            x_last = pad + (n - 1) * sx
+            y_last = height - pad - (values[-1] - vmin) * sy
+            x_new = width - pad  # extend to chart right edge
+            y_new = height - pad - (overlay_last - vmin) * sy
+            overlay_path = f"M{x_last:.1f},{y_last:.1f} L{x_new:.1f},{y_new:.1f}"
+        return {'w': width, 'h': height, 'path': ' '.join(parts), 'overlay': overlay_path, 'zero_y': f"{y0:.1f}"}
+
+    # Calculate unrealized additions to cumulative series
+    open_all_add = sum((p.get('open_pnl') or 0.0) for p in [])
+    # We will fill from open_positions built below; initialize now
+    open_all_add = 0.0
+    open_buy_add = 0.0
+    open_sell_add = 0.0
+
+    # Rules text (cleaned): drop empty and commented lines
+    rules_clean = ''
+    try:
+        if system and getattr(system, 'signal_settings', None):
+            raw = system.signal_settings.signal_logic or ''
+            lines = []
+            for ln in (raw.splitlines() if raw else []):
+                s = ln.strip()
+                if not s or s.startswith('#'):
+                    continue
+                lines.append(s)
+            rules_clean = "\n".join(lines)
+    except Exception:
+        rules_clean = ''
+
+    context = {

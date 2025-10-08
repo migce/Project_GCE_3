@@ -396,6 +396,16 @@ class TradingSystem(models.Model):
         verbose_name='SAR (Stop & Reverse)',
         help_text='If enabled, OPEN signals reverse the position (close opposite side)'
     )
+    multiple_positions = models.BooleanField(
+        default=False,
+        verbose_name='Multiple Positions',
+        help_text='Allow opening additional positions on repeated signals in the same direction'
+    )
+    max_positions_per_side = models.PositiveIntegerField(
+        default=5,
+        verbose_name='Max positions per side',
+        help_text='Cap for concurrently open positions per direction when Multiple Positions is enabled'
+    )
     lot_size = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -617,6 +627,9 @@ class SignalEvent(models.Model):
     event_time = models.DateTimeField(verbose_name='Event Time')
     created_at = models.DateTimeField(auto_now_add=True)
     ind_values = models.JSONField(null=True, blank=True, verbose_name='Indicator values')
+    # Trading cycle identifier: starts with first OPEN when side had no open positions,
+    # persists across subsequent OPENs for the same side until the last position is closed.
+    cycle_uid = models.CharField(max_length=128, null=True, blank=True, db_index=True)
 
     class Meta:
         ordering = ['-event_time']
@@ -624,6 +637,7 @@ class SignalEvent(models.Model):
             models.Index(fields=['trading_system', 'level', '-event_time']),
             models.Index(fields=['feed', '-event_time']),
             models.Index(fields=['direction', 'action', '-event_time']),
+            models.Index(fields=['trading_system', 'cycle_uid', '-event_time']),
         ]
         unique_together = [('trading_system', 'level', 'event_time', 'direction', 'action')]
 

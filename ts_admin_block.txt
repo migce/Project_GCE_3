@@ -1,0 +1,221 @@
+@admin.register(TradingSystem)
+class TradingSystemAdmin(admin.ModelAdmin):
+    """Админ панель для торговых систем"""
+    
+    list_display = [
+        'system_status_icon', 'system_sid', 'name', 'symbol', 'magic_number', 'magic_number', 
+        'timeframes_count', 'time_offset_minutes', 'is_active', 'trading_enabled', 'is_sar', 'lot_size',
+        'created_at'
+    ]
+    
+    list_filter = [
+        'is_active', 'symbol', 'timeframes_count', 'created_at'
+    ]
+    
+    search_fields = [
+        'system_sid', 'name', 'symbol', 'description'
+    ]
+    
+    list_editable = [
+        'is_active', 'trading_enabled', 'is_sar', 'lot_size'
+    ]
+    
+    readonly_fields = [
+        'created_at', 'updated_at', 'expected_files_info', 'file_pattern_info'
+    ]
+    
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('system_sid', 'name', 'symbol')
+        }),
+        ('Конфигурация', {
+            'fields': (
+                'timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number',
+                'is_active', 'trading_enabled', 'is_sar', 'lot_size'
+            )
+        }),
+        ('Дополнительно', {
+            'fields': ('description',),
+            'classes': ('collapse',)
+        }),
+        ('Системная информация', {
+            'fields': ('expected_files_info', 'file_pattern_info', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    class SignalSettingsInline(admin.StackedInline):
+        model = TradingSystemSignalSettings
+        extra = 0
+        max_num = 1
+        can_delete = True
+        verbose_name = 'Signal Logic'
+        verbose_name_plural = 'Signal Logic'
+        readonly_fields = ['indicators_available']
+        fields = ('signal_logic', 'signal_base_tf_level', 'signal_indicators', 'indicators_available')
+
+        def get_formset(self, request, obj=None, **kwargs):
+            # Keep a reference to parent TradingSystem for readonly field rendering when obj is not yet saved
+            self._parent_ts = obj
+            return super().get_formset(request, obj, **kwargs)
+
+        def indicators_available(self, obj):
+            from django.utils.html import format_html
+            # Determine trading system
+            ts = None
+            if obj and getattr(obj, 'trading_system_id', None):
+                ts = obj.trading_system
+            elif hasattr(self, '_parent_ts') and self._parent_ts is not None:
+                ts = self._parent_ts
+            if ts is None:
+                return 'Save Trading System first to see indicators.'
+
+            # Always read from global feed
+            from .models import TradingSystemTFBinding, MarketIndicatorDef
+            bindings = list(TradingSystemTFBinding.objects.filter(trading_system=ts).select_related('feed'))
+            if not bindings:
+                return 'No TF bindings yet. Add bindings to see indicators.'
+            levels_map = {}
+            all_names = set()
+            for b in bindings:
+                names = list(MarketIndicatorDef.objects.filter(feed=b.feed)
+                             .values_list('name', flat=True).order_by('name').distinct())
+                for n in names:
+                    levels_map.setdefault(n, set()).add(int(b.level))
+                all_names.update(names)
+            if not all_names:
+                return 'No indicators detected yet in global feed. Import data or verify bindings.'
+            lines = []
+            for name in sorted(all_names):
+                lvls = sorted(levels_map.get(name, []))
+                lvls_str = ', '.join(f'L{v}' for v in lvls) if lvls else '-'
+                lines.append(f"{name}: {lvls_str}")
+            html = '<pre style="white-space: pre-wrap; background:#f8f9fa; padding:8px; border-radius:4px; max-height:240px; overflow:auto;">' \
+                   + '\n'.join(lines) + '</pre>'
+            return format_html(html)
+        indicators_available.short_description = 'Available Indicators (by TF levels)'
+
+    class TFBindingInline(admin.TabularInline):
+        model = TradingSystemTFBinding
+        extra = 0
+        fields = ['level', 'feed']
+        ordering = ['level']
+
+    inlines = [TimeFrameInline, TFBindingInline, SignalSettingsInline]
+    actions = ['scan_global_files', 'import_global_pending', 'wipe_global_market_data', 'reset_and_reimport', 'generate_signals_now']
+    
+    def system_status_icon(self, obj):
+        if obj.is_active:
+            return format_html(
+                '<span style="color: green; font-size: 16px;">●</span>'
+            )
+        else:
+            return format_html(
+                '<span style="color: red; font-size: 16px;">●</span>'
+            )
+    
+    system_status_icon.short_description = 'Статус'
+    
+    def files_count(self, obj):
+        count = obj.data_files.count()
+        if count > 0:
+            return format_html(
+                '<a href="{}?trading_system__id__exact={}">{} files</a>',
+                reverse('admin:main_datafile_changelist'),
+                obj.id,
+                count
+            )
+        return '0 files'
+    
+    files_count.short_description = 'Файлы'
+    
+    def expected_files_info(self, obj):
+        return f"Ожидается файлов: {obj.get_expected_files_count()}"
+    
+    expected_files_info.short_description = 'Ожидаемые файлы'
+    
+    def file_pattern_info(self, obj):
+        return format_html('<code>{}</code>', obj.get_file_pattern())
+    
+    file_pattern_info.short_description = 'Паттерн файлов'
+
+    def get_fieldsets(self, request, obj=None):
+        fs = list(super().get_fieldsets(request, obj))
+        # Ensure compatibility if model lacks data_dir
+        try:
+            has_data_dir = any(f.name == 'data_dir' for f in self.model._meta.get_fields())
+        except Exception:
+            has_data_dir = False
+        if not has_data_dir:
+            # Remove data_dir if present in second fieldset
+            new_fs = []
+            for name, opts in fs:
+                fields = list(opts.get('fields', ()))
+                if 'data_dir' in fields:
+                    fields = [f for f in fields if f != 'data_dir']
+                    opts = dict(opts)
+                    opts['fields'] = tuple(fields)
+                new_fs.append((name, opts))
+            fs = new_fs
+        return fs
+
+    def scan_global_files(self, request, queryset):
+        from .services.global_feed_collector import collect_for_system
+        total_c = total_u = total_s = 0
+        for system in queryset:
+            c, u, s = collect_for_system(system)
+            total_c += c; total_u += u; total_s += s
+        self.message_user(request, f"Global scan → Created: {total_c}, Updated: {total_u}, Unchanged: {total_s}")
+    scan_global_files.short_description = 'Scan global feed files (by TF bindings)'
+
+    def import_global_pending(self, request, queryset):
+        from .models import MarketDataFile
+        from .services.global_importer import import_market_datafile
+        ok = failed = 0
+        details = []
+        for system in queryset:
+            mdfs = MarketDataFile.objects.filter(feed__system_bindings__trading_system=system, status='pending')
+            for mdf in mdfs:
+                try:
+                    res = import_market_datafile(mdf)
+                    ok += 1
+                except Exception as e:
+                    failed += 1
+                    details.append(f"{mdf.filename}: {e}")
+        self.message_user(request, f"Global import → OK: {ok}, Failed: {failed} {'| ' + ', '.join(details[:2]) if details else ''}")
+    import_global_pending.short_description = 'Import global pending files'
+
+    def wipe_global_market_data(self, request, queryset):
+        from django.db import transaction
+        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog
+        total_bars = total_vals = total_defs = total_signals = total_execs = 0
+        with transaction.atomic():
+            for system in queryset:
+                feeds = [b.feed_id for b in system.tf_bindings.all()]
+                if not feeds:
+                    continue
+                vals_qs = MarketIndicatorValue.objects.filter(bar__feed_id__in=feeds)
+                total_vals += vals_qs.count()
+                vals_qs.delete()
+                bars_qs = MarketBar.objects.filter(feed_id__in=feeds)
+                total_bars += bars_qs.count()
+                bars_qs.delete()
+                defs_qs = MarketIndicatorDef.objects.filter(feed_id__in=feeds)
+                total_defs += defs_qs.count()
+                defs_qs.delete()
+                # Derived outputs: signals and executions for this system
+                exec_qs = SignalExecutionLog.objects.filter(signal__trading_system=system)
+                total_execs += exec_qs.count()
+                exec_qs.delete()
+                sig_qs = SignalEvent.objects.filter(trading_system=system)
+                total_signals += sig_qs.count()
+                sig_qs.delete()
+                # Reset MarketDataFile status to pending to force re-import
+                MarketDataFile.objects.filter(feed_id__in=feeds).update(status='pending', processed_at=None)
+        self.message_user(request, f"Wiped global data for selected systems → Bars={total_bars}, IndicatorValues={total_vals}, IndicatorDefs={total_defs}, Signals={total_signals}, ExecLogs={total_execs}")
+        wipe_global_market_data.short_description = 'Wipe global market data for selected systems'
+
+    def reset_and_reimport(self, request, queryset):
+        """Full reset (wipe + rescan + reimport + regenerate) for selected systems."""
+        from .services.global_feed_collector import collect_for_system
+        from .services.global_importer import import_market_datafile

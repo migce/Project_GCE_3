@@ -627,6 +627,20 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                 pos_count[side] = pos_count.get(side, 0) + 1
             else:
                 pos_count[side] = max(0, pos_count.get(side, 0) - 1)
+        # Seed active cycle ids if there are open positions from past
+        active_cycle: Dict[str, Optional[str]] = {'BUY': None, 'SELL': None}
+        for side in ('BUY', 'SELL'):
+            if pos_count.get(side, 0) > 0:
+                last_open = (seed_qs.filter(direction=side, action='OPEN').order_by('-event_time').first())
+                if last_open and getattr(last_open, 'cycle_uid', None):
+                    active_cycle[side] = last_open.cycle_uid
+                elif last_open:
+                    try:
+                        active_cycle[side] = f"{system.system_sid}:L{base_level}:{side}:{last_open.event_time:%Y%m%d%H%M%S}"
+                    except Exception:
+                        active_cycle[side] = f"{system.system_sid}:L{base_level}:{side}:seed"
+            else:
+                active_cycle[side] = None
     except Exception:
         pass
 
@@ -661,6 +675,12 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
             changed_nonbase[key] = (prev_val is not None) and (curr_val != prev_val)
             # Update snapshot for the next base bar
             nonbase_last_value[key] = curr_val
+
+        # Active cycle per side within this run
+        try:
+            active_cycle
+        except NameError:
+            active_cycle = {'BUY': None, 'SELL': None}
 
         def env_get(name: str, level: Optional[int], lag: int) -> Optional[int]:
             return _env_get_global(name, level, lag, base_hist, base_level, series)
@@ -703,6 +723,17 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                         else:
                             cur = series.get((name, eff))
                             snapshot[key] = cur.value(0) if cur else None
+                    # Determine cycle UID
+                    cy_uid = active_cycle.get(direction)
+                    if act_kind == 'OPEN':
+                        if pos_count.get(direction, 0) <= 0 or not cy_uid:
+                            # Start new cycle on first open of side
+                            try:
+                                cy_uid = f"{system.system_sid}:L{base_level}:{direction}:{btime_mb(mb):%Y%m%d%H%M%S}"
+                            except Exception:
+                                cy_uid = f"{system.system_sid}:L{base_level}:{direction}:{int(len(events))}"
+                            active_cycle[direction] = cy_uid
+                    # Append event
                     events.append(SignalEvent(
                         trading_system=system,
                         timeframe=None,
@@ -713,6 +744,7 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                         rule_text=str(r),
                         event_time=btime_mb(mb),
                         action=act_kind,
+                        cycle_uid=cy_uid,
                         ind_values=snapshot,
                     ))
                     # Update local position counters to reflect generated stream
@@ -720,6 +752,9 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                         pos_count[direction] = pos_count.get(direction, 0) + 1
                     else:
                         pos_count[direction] = max(0, pos_count.get(direction, 0) - 1)
+                        # Close cycle when side count goes to zero
+                        if pos_count.get(direction, 0) == 0:
+                            active_cycle[direction] = None
     return events
 
 

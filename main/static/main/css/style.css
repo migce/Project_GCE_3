@@ -660,6 +660,10 @@ body {
 .spark-line.buy { stroke:#166534; }
 .spark-line.sell { stroke:#991b1b; }
 .spark-zero { stroke:#e5e7eb; stroke-width:1; }
+.spark-overlay { fill:none; stroke-width:1.2; stroke-dasharray:3 3; opacity:.75; }
+.spark-overlay.all { stroke:#1f2d5a; }
+.spark-overlay.buy { stroke:#166534; }
+.spark-overlay.sell { stroke:#991b1b; }
 
 /* Rules box */
 .rules-box { width:100%; border:1px solid #e6e9ee; border-radius:8px; background:#fff; margin:6px 0 16px; }

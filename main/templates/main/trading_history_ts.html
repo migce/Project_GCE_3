@@ -1,56 +1,13 @@
 {% extends 'main/base.html' %}
 
-{% block title %}Trading History (TradeStation) - Project GCE 3{% endblock %}
+{% block title %}TradeStaton Simulation - Project GCE 3{% endblock %}
 
 {% block content %}
 {% include 'main/_th_tabs.html' %}
 <div class="card card-flat">
   <div class="card-header" style="border-bottom:1px solid #e6e9ee; margin-bottom:1rem; padding-bottom:0.75rem;">
-    <h2 class="page-title-pro">Trading History — TradeStation Signals</h2>
-    <p class="text-subtle">Reversal system built from Signal Events</p>
+    <h2 class="page-title-pro">TradeStaton Simulation</h2>
   </div>
-
-  <div class="kpi-grid">
-    <div class="kpi"><div class="kpi-label">Total Trades</div><div class="kpi-value">{{ total_trades|default:"0" }}</div></div>
-    <div class="kpi"><div class="kpi-label">Total PnL (pips)</div><div class="kpi-value">{{ total_pips|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value">{{ win_rate|floatformat:1 }}%</div></div>
-    <div class="kpi"><div class="kpi-label">Base TF</div><div class="kpi-value">{% if selected_tf %}{{ selected_tf.timeframe }}{% else %}-{% endif %}</div></div>
-    <div class="kpi"><div class="kpi-label">Profit Factor</div><div class="kpi-value">{% if kpi_profit_factor %}{{ kpi_profit_factor|floatformat:2 }}{% else %}-{% endif %}</div></div>
-    <div class="kpi"><div class="kpi-label">Payoff Ratio</div><div class="kpi-value">{% if kpi_payoff %}{{ kpi_payoff|floatformat:2 }}{% else %}-{% endif %}</div></div>
-    <div class="kpi"><div class="kpi-label">Expectancy (pips)</div><div class="kpi-value">{{ kpi_expectancy|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Max Drawdown (pips)</div><div class="kpi-value">{{ kpi_max_dd|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Avg Duration</div><div class="kpi-value">{{ kpi_avg_duration }}</div></div>
-    <div class="kpi"><div class="kpi-label">Streaks (W/L)</div><div class="kpi-value">{{ kpi_streaks.win }}/{{ kpi_streaks.loss }}</div></div>
-    <div class="kpi"><div class="kpi-label">Direction Mix</div><div class="kpi-value">BUY {{ kpi_dir_mix.buy_pct|floatformat:0 }}% / SELL {{ kpi_dir_mix.sell_pct|floatformat:0 }}%</div></div>
-    <div class="kpi">
-      <div class="kpi-label">Cum PnL (All)</div>
-      <svg width="{{ spark_overall.w }}" height="{{ spark_overall.h }}" class="spark">
-        <line x1="0" y1="{{ spark_overall.zero_y }}" x2="{{ spark_overall.w }}" y2="{{ spark_overall.zero_y }}" class="spark-zero"/>
-        <path d="{{ spark_overall.path }}" class="spark-line all"/>
-      </svg>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Cum PnL (Buy)</div>
-      <svg width="{{ spark_buy.w }}" height="{{ spark_buy.h }}" class="spark">
-        <line x1="0" y1="{{ spark_buy.zero_y }}" x2="{{ spark_buy.w }}" y2="{{ spark_buy.zero_y }}" class="spark-zero"/>
-        <path d="{{ spark_buy.path }}" class="spark-line buy"/>
-      </svg>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Cum PnL (Sell)</div>
-      <svg width="{{ spark_sell.w }}" height="{{ spark_sell.h }}" class="spark">
-        <line x1="0" y1="{{ spark_sell.zero_y }}" x2="{{ spark_sell.w }}" y2="{{ spark_sell.zero_y }}" class="spark-zero"/>
-        <path d="{{ spark_sell.path }}" class="spark-line sell"/>
-      </svg>
-    </div>
-  </div>
-
-  {% if rules_clean %}
-  <div class="rules-box card-flat">
-    <div class="rules-head">Trading Rules</div>
-    <pre class="rules-pre">{{ rules_clean }}</pre>
-  </div>
-  {% endif %}
 
   <form method="get" class="form-pro">
     <div class="form-pro-grid">
@@ -66,13 +23,92 @@
         <label class="form-pro-label">Base TF Level</label>
         <input type="number" name="tf" value="{{ base_level }}" min="1" step="1" class="form-pro-control" />
       </div>
-      <div>
-        <label class="form-pro-label">Max events</label>
-        <input type="number" name="limit" value="200" min="20" step="20" class="form-pro-control" />
-      </div>
       <div class="form-pro-action"><button class="btn btn-pro" style="width:100%;">Apply</button></div>
     </div>
   </form>
+
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-label">Total Trades</div><div class="kpi-value">{{ total_trades|default:"0" }}</div></div>
+    <div class="kpi"><div class="kpi-label">Total PnL (pips)</div><div class="kpi-value">{{ total_pips|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value">{{ win_rate|floatformat:1 }}%</div></div>
+    <div class="kpi"><div class="kpi-label">Base TF</div><div class="kpi-value">{% if selected_tf %}{{ selected_tf.timeframe }}{% else %}-{% endif %}</div></div>
+    <div class="kpi"><div class="kpi-label">Open PnL (pips)</div><div class="kpi-value">{{ kpi_open_pnl|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Cycles (done)</div><div class="kpi-value">{{ kpi_cycles.all }} (B {{ kpi_cycles.buy }}, S {{ kpi_cycles.sell }})</div></div>
+    <div class="kpi"><div class="kpi-label">Profit Factor</div><div class="kpi-value">{% if kpi_profit_factor %}{{ kpi_profit_factor|floatformat:2 }}{% else %}-{% endif %}</div></div>
+    <div class="kpi"><div class="kpi-label">Payoff Ratio</div><div class="kpi-value">{% if kpi_payoff %}{{ kpi_payoff|floatformat:2 }}{% else %}-{% endif %}</div></div>
+    <div class="kpi"><div class="kpi-label">Expectancy (pips)</div><div class="kpi-value">{{ kpi_expectancy|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Max Drawdown (pips)</div><div class="kpi-value">{{ kpi_max_dd|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Avg Duration</div><div class="kpi-value">{{ kpi_avg_duration }}</div></div>
+    <div class="kpi"><div class="kpi-label">Streaks (W/L)</div><div class="kpi-value">{{ kpi_streaks.win }}/{{ kpi_streaks.loss }}</div></div>
+    <div class="kpi"><div class="kpi-label">Direction Mix</div><div class="kpi-value">BUY {{ kpi_dir_mix.buy_pct|floatformat:0 }}% / SELL {{ kpi_dir_mix.sell_pct|floatformat:0 }}%</div></div>
+    <div class="kpi">
+      <div class="kpi-label">Cum PnL (All)</div>
+      <svg width="{{ spark_overall.w }}" height="{{ spark_overall.h }}" class="spark">
+        <line x1="0" y1="{{ spark_overall.zero_y }}" x2="{{ spark_overall.w }}" y2="{{ spark_overall.zero_y }}" class="spark-zero"/>
+        <path d="{{ spark_overall.path }}" class="spark-line all"/>
+        {% if spark_overall.overlay %}<path d="{{ spark_overall.overlay }}" class="spark-overlay all"/>{% endif %}
+      </svg>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Cum PnL (Buy)</div>
+      <svg width="{{ spark_buy.w }}" height="{{ spark_buy.h }}" class="spark">
+        <line x1="0" y1="{{ spark_buy.zero_y }}" x2="{{ spark_buy.w }}" y2="{{ spark_buy.zero_y }}" class="spark-zero"/>
+        <path d="{{ spark_buy.path }}" class="spark-line buy"/>
+        {% if spark_buy.overlay %}<path d="{{ spark_buy.overlay }}" class="spark-overlay buy"/>{% endif %}
+      </svg>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Cum PnL (Sell)</div>
+      <svg width="{{ spark_sell.w }}" height="{{ spark_sell.h }}" class="spark">
+        <line x1="0" y1="{{ spark_sell.zero_y }}" x2="{{ spark_sell.w }}" y2="{{ spark_sell.zero_y }}" class="spark-zero"/>
+        <path d="{{ spark_sell.path }}" class="spark-line sell"/>
+        {% if spark_sell.overlay %}<path d="{{ spark_sell.overlay }}" class="spark-overlay sell"/>{% endif %}
+      </svg>
+    </div>
+  </div>
+
+  {% if rules_clean %}
+  <div class="rules-box card-flat">
+    <div class="rules-head">Trading Rules</div>
+    <pre class="rules-pre">{{ rules_clean }}</pre>
+  </div>
+  {% endif %}
+
+  {% if open_positions %}
+  <div class="table-pro" style="margin-bottom:1rem;">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th colspan="5" style="text-align:left; font-weight:600;">Open Positions (no Close yet)</th>
+        </tr>
+        <tr style="background:#f8f9fa;">
+          <th>Open Time</th>
+          <th>Direction</th>
+          <th>Open</th>
+          <th>Now</th>
+          <th>Unrealized (pips)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in open_positions %}
+        <tr>
+          <td>
+            {% if p.open_id %}
+              <a href="{% url 'admin:main_signalevent_change' p.open_id %}" target="_blank">{{ p.open_time|date:"Y-m-d H:i:s" }}</a>
+            {% else %}
+              {{ p.open_time|date:"Y-m-d H:i:s" }}
+            {% endif %}
+          </td>
+          <td>{{ p.open_dir }}</td>
+          <td>{% if p.open_price %}{{ p.open_price|floatformat:5 }}{% else %}-{% endif %}</td>
+          <td>{% if p.cur_price %}{{ p.cur_price|floatformat:5 }}{% else %}-{% endif %}</td>
+          <td>{% if p.open_pnl is not None %}{{ p.open_pnl|floatformat:1 }}{% else %}-{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
 
   <div class="table-pro">
     <table class="table">

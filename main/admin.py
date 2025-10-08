@@ -491,6 +491,21 @@ class TradingSystemAdmin(admin.ModelAdmin):
                     opts['fields'] = tuple(fields)
                 new_fs.append((name, opts))
             fs = new_fs
+        # Inject Multiple Positions settings into the general settings fieldset if missing
+        try:
+            updated = []
+            for name, opts in fs:
+                fields = list(opts.get('fields', ()))
+                if 'is_sar' in fields and 'multiple_positions' not in fields:
+                    # Insert right after is_sar
+                    idx = fields.index('is_sar') + 1
+                    fields[idx:idx] = ['multiple_positions', 'max_positions_per_side']
+                    opts = dict(opts)
+                    opts['fields'] = tuple(fields)
+                updated.append((name, opts))
+            fs = updated
+        except Exception:
+            pass
         return fs
 
     def scan_global_files(self, request, queryset):
@@ -667,8 +682,8 @@ class TimeFrameAdmin(admin.ModelAdmin):
 
 @admin.register(SignalEvent)
 class SignalEventAdmin(admin.ModelAdmin):
-    list_display = ['event_time', 'direction', 'action', 'trading_system', 'level', 'feed', 'price_close', 'values_short']
-    list_filter = ['trading_system', 'level', 'feed', 'direction', 'action']
+    list_display = ['event_time', 'direction', 'action', 'trading_system', 'level', 'feed', 'cycle_uid', 'price_close', 'values_short']
+    list_filter = ['trading_system', 'level', 'feed', 'direction', 'action', 'cycle_uid']
     search_fields = ['trading_system__system_sid']
     date_hierarchy = 'event_time'
     ordering = ['-event_time']

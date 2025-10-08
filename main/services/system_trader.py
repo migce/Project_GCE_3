@@ -86,33 +86,46 @@ class SystemTrader:
             if sig.action == 'OPEN':
                 # Stop & Reverse behavior (optional)
                 sar = getattr(sys, 'is_sar', True)
+                allow_multi = bool(getattr(sys, 'multiple_positions', False))
+                max_side = int(getattr(sys, 'max_positions_per_side', 5) or 5)
                 if sig.direction == 'BUY':
                     if sar:
                         self._close_side(svc, sys, 'SELL')
                     # In non-SAR mode, do not auto-close opposite; skip OPEN if opposite exists
-                    if self._has_side(svc, sys, 'BUY'):
-                        ok = True
-                        msg = 'BUY already open, skipped'
-                    elif not sar and self._has_side(svc, sys, 'SELL'):
+                    if (not sar) and self._has_side(svc, sys, 'SELL'):
                         ok = True
                         msg = 'SELL open, skip BUY (non-SAR)'
                     else:
-                        res = svc.market_buy(symbol, lot, magic=magic, comment=f'{sys.system_sid} BUY')
-                        ok = bool(res.get('success'))
-                        msg = res.get('message', '')
+                        # Check current BUY count
+                        cnt = self._side_count(svc, sys, 'BUY')
+                        if cnt > 0 and not allow_multi:
+                            ok = True
+                            msg = 'BUY already open, skipped (single-position mode)'
+                        elif allow_multi and cnt >= max_side:
+                            ok = True
+                            msg = f'BUY side at limit {max_side}, skipped'
+                        else:
+                            res = svc.market_buy(symbol, lot, magic=magic, comment=f'{sys.system_sid} BUY')
+                            ok = bool(res.get('success'))
+                            msg = res.get('message', '')
                 else:
                     if sar:
                         self._close_side(svc, sys, 'BUY')
-                    if self._has_side(svc, sys, 'SELL'):
-                        ok = True
-                        msg = 'SELL already open, skipped'
-                    elif not sar and self._has_side(svc, sys, 'BUY'):
+                    if (not sar) and self._has_side(svc, sys, 'BUY'):
                         ok = True
                         msg = 'BUY open, skip SELL (non-SAR)'
                     else:
-                        res = svc.market_sell(symbol, lot, magic=magic, comment=f'{sys.system_sid} SELL')
-                        ok = bool(res.get('success'))
-                        msg = res.get('message', '')
+                        cnt = self._side_count(svc, sys, 'SELL')
+                        if cnt > 0 and not allow_multi:
+                            ok = True
+                            msg = 'SELL already open, skipped (single-position mode)'
+                        elif allow_multi and cnt >= max_side:
+                            ok = True
+                            msg = f'SELL side at limit {max_side}, skipped'
+                        else:
+                            res = svc.market_sell(symbol, lot, magic=magic, comment=f'{sys.system_sid} SELL')
+                            ok = bool(res.get('success'))
+                            msg = res.get('message', '')
             else:  # CLOSE
                 side = 'BUY' if sig.direction == 'BUY' else 'SELL'
                 ok = self._close_side(svc, sys, side)
@@ -126,6 +139,10 @@ class SystemTrader:
     def _has_side(self, svc, sys: TradingSystem, side: str) -> bool:
         positions = svc.get_open_positions_for(symbol=sys.symbol, magic=getattr(sys, 'magic_number', None))
         return any(p.get('type') == side for p in positions)
+
+    def _side_count(self, svc, sys: TradingSystem, side: str) -> int:
+        positions = svc.get_open_positions_for(symbol=sys.symbol, magic=getattr(sys, 'magic_number', None))
+        return sum(1 for p in positions if p.get('type') == side)
 
     def _close_side(self, svc, sys: TradingSystem, side: str, retries: int = 3) -> bool:
         symbol = sys.symbol or 'EURUSD'
