@@ -601,17 +601,11 @@ class TradingSystemAdmin(admin.ModelAdmin):
                 except Exception:
                     settings = None
                 base_level = getattr(settings, 'signal_base_tf_level', None) or 1
-                use_global = bool(getattr(settings, 'use_global_feed', False))
+                # Global-feed is the only implemented engine; compute limit from bound feed if possible
                 limit = 1000
-                if use_global:
-                    bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
-                    if bind:
-                        limit = MarketBar.objects.filter(feed=bind.feed).count() or 0
-                else:
-                    base_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
-                    if base_tf:
-                        # Legacy bars no longer used; fallback to a safe default if needed
-                        limit = 1000
+                bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+                if bind:
+                    limit = MarketBar.objects.filter(feed=bind.feed).count() or 0
 
                 events = generate_signals_for_system(system, limit_bars=max(0, limit))
 

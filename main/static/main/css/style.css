@@ -592,3 +592,76 @@ body {
         align-items: center;
     }
 }
+/* --- Institutional theme (compact, neutral) --- */
+.card-flat {
+    box-shadow: none !important;
+    border: 1px solid #e6e9ee;
+    border-radius: 8px;
+}
+
+.page-title-pro {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1f2d3d;
+}
+
+.text-subtle { color: #6b7280; font-size: 0.9rem; }
+
+.kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+    margin: 0 0 1rem 0;
+}
+.kpi {
+    background: #fff;
+    border: 1px solid #e6e9ee;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+}
+.kpi-value {
+    font-weight: 600;
+    font-size: 1.25rem;
+    color: #0f172a; /* near-black */
+}
+.kpi-label {
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-size: .72rem;
+    color: #6b7280;
+    margin-bottom: 2px;
+}
+
+.form-pro { background:#f8f9fb; border:1px solid #e6e9ee; border-radius:8px; padding:12px; margin: 8px 0 14px; }
+.form-pro-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap: 12px; align-items:end; }
+.form-pro-label { display:block; font-size:.8rem; color:#4b5563; margin-bottom:4px; font-weight:500; }
+.form-pro-control { width:100%; padding:8px 10px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; height:36px; }
+.form-pro-action { display:flex; align-items:flex-end; }
+
+.btn-pro { background:#0f296a; color:#fff; border:1px solid #0b245a; border-radius:6px; padding:.55rem 1rem; font-weight:600; }
+.btn-pro:hover { background:#0b245a; }
+
+.table-pro { background:white; border:1px solid #e6e9ee; border-radius:8px; overflow:hidden; }
+.table-pro .table thead th { background:#f2f4f7 !important; }
+.table-pro .table td { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono','Courier New', monospace; font-size: 0.85rem; }
+
+@media (max-width: 768px) {
+  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Sparklines */
+.kpi-spark .spark-row { display:flex; gap:12px; align-items:center; margin-top:4px; }
+.spark-item { display:flex; flex-direction:column; gap:2px; }
+.spark-label { font-size:.7rem; color:#6b7280; }
+.spark { display:block; }
+.kpi .spark { margin-top: 4px; }
+.spark-line { fill:none; stroke-width:1.5; }
+.spark-line.all { stroke:#1f2d5a; }
+.spark-line.buy { stroke:#166534; }
+.spark-line.sell { stroke:#991b1b; }
+.spark-zero { stroke:#e5e7eb; stroke-width:1; }
+
+/* Rules box */
+.rules-box { width:100%; border:1px solid #e6e9ee; border-radius:8px; background:#fff; margin:6px 0 16px; }
+.rules-head { font-size:.78rem; color:#4b5563; padding:8px 10px; border-bottom:1px solid #e6e9ee; text-transform:uppercase; letter-spacing:.04em; }
+.rules-pre { margin:0; padding:10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono','Courier New', monospace; font-size:.85rem; line-height:1.35; max-height:28vh; min-height:96px; overflow:auto; white-space:pre-wrap; word-break:break-word; }

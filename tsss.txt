@@ -1,0 +1,61 @@
+class TradingSystemSignalSettings(models.Model):
+    """Per-system signal logic configuration."""
+
+    trading_system = models.OneToOneField(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='signal_settings',
+        verbose_name='Trading System'
+    )
+    signal_logic = models.TextField(
+        blank=True,
+        verbose_name='Signal Logic (IF/THEN/ELSE)',
+        help_text='Rules DSL, e.g., IF cond THEN BUY ELSE NONE'
+    )
+    signal_base_tf_level = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Base TF Level',
+        help_text='TF level to evaluate rules on (1=M1, 2=M2, ...). Optional.'
+    )
+    signal_indicators = models.TextField(
+        blank=True,
+        verbose_name='Indicators Description',
+        help_text='List/mapping of indicator names and their TFs available in rules'
+    )
+    use_global_feed = models.BooleanField(
+        default=False,
+        verbose_name='Use Global Feed',
+        help_text='If enabled, rules read data from provider-agnostic global feed with TF level bindings'
+    )
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated')
+
+    class Meta:
+        verbose_name = 'Signal Settings'
+        verbose_name_plural = 'Signal Settings'
+
+    def __str__(self):
+        return f"Signal Settings for {self.trading_system.system_sid}"
+
+class TimeFrame(models.Model):
+    """Модель для описания таймфреймов торговой системы"""
+    
+    TIMEFRAME_CHOICES = [
+        ('M1', '1 Minute'),
+        ('M2', '2 Minutes'),
+        ('M5', '5 Minutes'),
+        ('M15', '15 Minutes'),
+        ('M30', '30 Minutes'),
+        ('H1', '1 Hour'),
+        ('H4', '4 Hours'),
+        ('D1', '1 Day'),
+        ('W1', '1 Week'),
+        ('MN1', '1 Month'),
+    ]
+    
+    # Связь с торговой системой
+    trading_system = models.ForeignKey(
+        TradingSystem,
+        on_delete=models.CASCADE,
+        related_name='timeframes',
+        verbose_name="Торговая система"

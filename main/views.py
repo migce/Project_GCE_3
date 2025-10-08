@@ -1266,6 +1266,128 @@ def trading_history_ts(request):
     trades = trades[-limit:]
     win_rate = (wins / total * 100.0) if total else 0.0
 
+    # --- Extended KPIs ---
+    gross_profit = sum((t.get('pips') or 0) for t in trades if (t.get('pips') or 0) > 0)
+    gross_loss_abs = sum(-(t.get('pips') or 0) for t in trades if (t.get('pips') or 0) < 0)
+    loss_count = max(0, total - wins)
+    avg_win = (gross_profit / wins) if wins else 0.0
+    avg_loss_abs = (gross_loss_abs / loss_count) if loss_count else 0.0
+    profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 1e-9 else None
+    payoff = (avg_win / avg_loss_abs) if avg_loss_abs > 1e-9 else None
+    expectancy = 0.0
+    if total:
+        expectancy = (wins / total) * avg_win - (loss_count / total) * avg_loss_abs
+
+    # Max drawdown (pips) from cumulative curve (negative number)
+    cum = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for t in trades:
+        cum += float(t.get('pips') or 0)
+        if cum > peak:
+            peak = cum
+        dd = cum - peak
+        if dd < max_dd:
+            max_dd = dd
+
+    # Avg duration
+    import math
+    durs = []
+    for t in trades:
+        ot = t.get('open_time'); ct = t.get('close_time')
+        if ot and ct:
+            try:
+                durs.append((ct - ot).total_seconds())
+            except Exception:
+                pass
+    avg_dur_s = (sum(durs) / len(durs)) if durs else 0
+    def _fmt_dur(secs: float) -> str:
+        s = int(secs)
+        d, s = divmod(s, 86400)
+        h, s = divmod(s, 3600)
+        m, _ = divmod(s, 60)
+        if d > 0:
+            return f"{d}d {h:02d}h"
+        if h > 0:
+            return f"{h}h {m:02d}m"
+        return f"{m}m"
+    avg_duration_hm = _fmt_dur(avg_dur_s)
+
+    # Streaks (wins/losses)
+    cur_w = cur_l = 0
+    max_w = max_l = 0
+    for t in trades:
+        p = t.get('pips') or 0
+        if p > 0:
+            cur_w += 1; cur_l = 0
+        elif p < 0:
+            cur_l += 1; cur_w = 0
+        else:
+            cur_w = cur_l = 0
+        if cur_w > max_w: max_w = cur_w
+        if cur_l > max_l: max_l = cur_l
+
+    # Direction mix
+    buy_cnt = sum(1 for t in trades if (t.get('open_dir') == 'BUY'))
+    sell_cnt = sum(1 for t in trades if (t.get('open_dir') == 'SELL'))
+    tot_dirs = max(1, buy_cnt + sell_cnt)
+    buy_pct = buy_cnt / tot_dirs * 100.0
+    sell_pct = sell_cnt / tot_dirs * 100.0
+
+    # Cumulative PnL series for sparklines (overall, buy-only, sell-only)
+    vals_all = []
+    vals_buy = []
+    vals_sell = []
+    s_all = s_buy = s_sell = 0.0
+    for t in trades:
+        p = float(t.get('pips') or 0.0)
+        s_all += p; vals_all.append(s_all)
+        if t.get('open_dir') == 'BUY':
+            s_buy += p
+        if t.get('open_dir') == 'SELL':
+            s_sell += p
+        vals_buy.append(s_buy)
+        vals_sell.append(s_sell)
+
+    def _spark(values, width=120, height=30, pad=2):
+        if not values:
+            return {'w': width, 'h': height, 'path': '', 'zero_y': height - pad}
+        n = len(values)
+        if n == 1:
+            values = [0.0, values[0]]; n = 2
+        vmin = min(values); vmax = max(values)
+        if vmin == vmax:
+            vmin -= 1.0; vmax += 1.0
+        sx = (width - 2*pad) / (n - 1)
+        sy = (height - 2*pad) / (vmax - vmin)
+        parts = []
+        for i, v in enumerate(values):
+            x = pad + i * sx
+            y = height - pad - (v - vmin) * sy
+            parts.append(f"{'M' if i==0 else 'L'}{x:.1f},{y:.1f}")
+        # zero line position
+        y0 = height - pad - (0 - vmin) * sy
+        return {'w': width, 'h': height, 'path': ' '.join(parts), 'zero_y': f"{y0:.1f}"}
+
+    spark_overall = _spark(vals_all)
+    spark_buy = _spark(vals_buy)
+    spark_sell = _spark(vals_sell)
+
+    # Rules text (cleaned): drop empty and commented lines
+    rules_clean = ''
+    try:
+        if system and getattr(system, 'signal_settings', None):
+            raw = system.signal_settings.signal_logic or ''
+            lines = []
+            for ln in (raw.splitlines() if raw else []):
+                s = ln.strip()
+                if not s or s.startswith('#'):
+                    continue
+                lines.append(s)
+            rules_clean = "\n".join(lines)
+    except Exception:
+        rules_clean = ''
+
     context = {
         'systems': systems,
         'selected_system': system,
@@ -1275,6 +1397,18 @@ def trading_history_ts(request):
         'total_pips': total_pips,
         'win_rate': win_rate,
         'total_trades': total,
+        # Extended KPIs
+        'kpi_profit_factor': profit_factor,
+        'kpi_payoff': payoff,
+        'kpi_expectancy': expectancy,
+        'kpi_max_dd': max_dd,
+        'kpi_avg_duration': avg_duration_hm,
+        'kpi_streaks': {'win': max_w, 'loss': max_l},
+        'kpi_dir_mix': {'buy_pct': buy_pct, 'sell_pct': sell_pct},
+        'spark_overall': spark_overall,
+        'spark_buy': spark_buy,
+        'spark_sell': spark_sell,
+        'rules_clean': rules_clean,
     }
     return render(request, 'main/trading_history_ts.html', context)
 

@@ -86,14 +86,32 @@ class GlobalIngestionWorker:
                     res = import_market_datafile(mdf)
                     imported += 1
                     rows += (res.bars_created or 0)
-                    # Generate signals
+                    # Generate and persist signals for systems bound to this feed
                     try:
-                        from ..models import TradingSystemTFBinding
+                        from django.utils import timezone as dj_tz
+                        from datetime import timedelta
+                        from ..models import TradingSystemTFBinding, SignalEvent
                         bindings = list(mdf.feed.system_bindings.all())
                         for b in bindings:
                             try:
                                 from .signal_engine import generate_signals_for_system
-                                generate_signals_for_system(b.trading_system, limit_bars=1000)
+                                evs = generate_signals_for_system(b.trading_system, limit_bars=1000) or []
+                                cutoff = dj_tz.now() - timedelta(days=2)
+                                for ev in evs:
+                                    # Avoid bloating DB with very old events
+                                    if getattr(ev, 'event_time', None) and ev.event_time < cutoff:
+                                        continue
+                                    # Idempotent insert
+                                    SignalEvent.objects.get_or_create(
+                                        trading_system=ev.trading_system,
+                                        timeframe=ev.timeframe,
+                                        level=getattr(ev, 'level', 1),
+                                        feed=getattr(ev, 'feed', None),
+                                        direction=ev.direction,
+                                        action=getattr(ev, 'action', 'OPEN'),
+                                        event_time=ev.event_time,
+                                        defaults={'rule_text': ev.rule_text, 'ind_values': getattr(ev, 'ind_values', None)},
+                                    )
                             except Exception:
                                 continue
                     except Exception:

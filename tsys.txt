@@ -1,0 +1,121 @@
+class TradingSystem(models.Model):
+    """Модель для настройки торговых систем TradeStation"""
+    
+    # Идентификатор системы
+    system_sid = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name="System ID",
+        help_text="Краткое название системы (например: DOTBIN, TestSys)"
+    )
+    
+    # Название системы
+    name = models.CharField(
+        max_length=200,
+        verbose_name="Название системы",
+        help_text="Полное описательное название торговой системы"
+    )
+    
+    # Валютная пара
+    symbol = models.CharField(
+        max_length=20,
+        default="EURUSD"
+    )
+
+    # System trading controls
+    trading_enabled = models.BooleanField(
+        default=False,
+        verbose_name='Allow Trading',
+        help_text='If enabled, signals may execute real trades for this system'
+    )
+    is_sar = models.BooleanField(
+        default=True,
+        verbose_name='SAR (Stop & Reverse)',
+        help_text='If enabled, OPEN signals reverse the position (close opposite side)'
+    )
+    lot_size = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.01,
+        verbose_name='Lot Size',
+        help_text='Default lot size to use for trades (e.g., 0.01)'
+    )
+
+    # MT5 magic number mapping for this system (optional)
+    magic_number = models.IntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Magic Number',
+        help_text='MT5 Expert Advisor magic number for mapping/filtering'
+    )
+    
+    # Количество уровней таймфреймов
+    timeframes_count = models.PositiveIntegerField(
+        verbose_name="Количество таймфреймов",
+        help_text="Сколько разных таймфреймов использует система",
+        default=1
+    )
+    
+    # Сдвиг времени
+    time_offset_minutes = models.IntegerField(
+        verbose_name="Сдвиг времени (минуты)",
+        help_text="Сдвиг времени в минутах (может быть отрицательным)",
+        default=0
+    )
+    
+    # Активность системы
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Активна",
+        help_text="Обрабатывать ли данные этой системы"
+    )
+    
+    # Дополнительная информация
+    description = models.TextField(
+        blank=True,
+        verbose_name="Описание",
+        help_text="Подробное описание торговой системы"
+    )
+    
+    # Метаданные
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Создано"
+    )
+    
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Обновлено"
+    )
+    
+    class Meta:
+        verbose_name = "Торговая система"
+        verbose_name_plural = "Торговые системы"
+        ordering = ['system_sid']
+    
+    def __str__(self):
+        return f"{self.system_sid} - {self.symbol} ({self.timeframes_count} TF)"
+    
+    def get_expected_files_count(self):
+        """Возвращает ожидаемое количество файлов для системы"""
+        return self.timeframes_count
+    
+    def get_file_pattern(self):
+        """Возвращает паттерн имён файлов для системы"""
+        return f"collector_{self.system_sid}_{self.symbol}_*.csv"
+
+    # Полный путь к папке с CSV для этой системы
+    data_dir = models.CharField(
+        max_length=500,
+        blank=True,
+        verbose_name="Папка с данными",
+        help_text="Полный путь к папке, где искать файлы системы. Если пусто, используется глобальная TS_EXPORTS_DIR."
+    )
+
+    def get_data_dir(self):
+        from django.conf import settings as django_settings
+        return self.data_dir or getattr(django_settings, 'TS_EXPORTS_DIR', r'C\\TS_EXPORTS')
+
+class TradingSystemSignalSettings(models.Model):
+    """Per-system signal logic configuration."""
+

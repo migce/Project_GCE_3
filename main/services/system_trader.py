@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Optional
 from django.utils import timezone
+from django.conf import settings as django_settings
 
 from ..models import TradingSystem, SignalEvent
 from ..models import SignalExecutionLog
@@ -53,9 +54,20 @@ class SystemTrader:
         with service as svc:
             if not svc.is_connected:
                 return
+            now = timezone.now()
+            max_age_sec = int(getattr(django_settings, 'SYSTEM_TRADER_MAX_SIGNAL_AGE_SECONDS', 120))
             for sys in systems:
-                # Unprocessed recent signals (last 1 day)
-                since = timezone.now() - timezone.timedelta(days=1)
+                # Execute only fresh signals to avoid backfilling upon enabling trading
+                since_cfg = now - timezone.timedelta(seconds=max(10, max_age_sec))
+                # When trading has just been enabled, ignore all older signals
+                try:
+                    since_enabled = getattr(sys, 'updated_at', None) or since_cfg
+                    if since_enabled and since_enabled > since_cfg:
+                        since = since_enabled
+                    else:
+                        since = since_cfg
+                except Exception:
+                    since = since_cfg
                 sigs = SignalEvent.objects.filter(
                     trading_system=sys, event_time__gte=since
                 ).order_by('event_time', 'action')[:200]

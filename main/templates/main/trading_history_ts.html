@@ -4,42 +4,77 @@
 
 {% block content %}
 {% include 'main/_th_tabs.html' %}
-<div class="card">
-  <div class="card-header">
-    <h2 class="card-title">Trading History (TradeStation Signals)</h2>
-    <p class="card-subtitle">Reversal system built from Signal Events</p>
+<div class="card card-flat">
+  <div class="card-header" style="border-bottom:1px solid #e6e9ee; margin-bottom:1rem; padding-bottom:0.75rem;">
+    <h2 class="page-title-pro">Trading History — TradeStation Signals</h2>
+    <p class="text-subtle">Reversal system built from Signal Events</p>
   </div>
 
-  <div class="dashboard-grid">
-    <div class="metric-card"><div class="metric-value">{{ total_trades|default:"0" }}</div><div class="metric-label">Total Trades</div></div>
-    <div class="metric-card"><div class="metric-value">{{ total_pips|floatformat:1 }}</div><div class="metric-label">Total PnL (pips)</div></div>
-    <div class="metric-card"><div class="metric-value">{{ win_rate|floatformat:1 }}%</div><div class="metric-label">Win Rate</div></div>
-    <div class="metric-card"><div class="metric-value">{% if selected_tf %}{{ selected_tf.timeframe }}{% else %}-{% endif %}</div><div class="metric-label">Base TF</div></div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-label">Total Trades</div><div class="kpi-value">{{ total_trades|default:"0" }}</div></div>
+    <div class="kpi"><div class="kpi-label">Total PnL (pips)</div><div class="kpi-value">{{ total_pips|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value">{{ win_rate|floatformat:1 }}%</div></div>
+    <div class="kpi"><div class="kpi-label">Base TF</div><div class="kpi-value">{% if selected_tf %}{{ selected_tf.timeframe }}{% else %}-{% endif %}</div></div>
+    <div class="kpi"><div class="kpi-label">Profit Factor</div><div class="kpi-value">{% if kpi_profit_factor %}{{ kpi_profit_factor|floatformat:2 }}{% else %}-{% endif %}</div></div>
+    <div class="kpi"><div class="kpi-label">Payoff Ratio</div><div class="kpi-value">{% if kpi_payoff %}{{ kpi_payoff|floatformat:2 }}{% else %}-{% endif %}</div></div>
+    <div class="kpi"><div class="kpi-label">Expectancy (pips)</div><div class="kpi-value">{{ kpi_expectancy|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Max Drawdown (pips)</div><div class="kpi-value">{{ kpi_max_dd|floatformat:1 }}</div></div>
+    <div class="kpi"><div class="kpi-label">Avg Duration</div><div class="kpi-value">{{ kpi_avg_duration }}</div></div>
+    <div class="kpi"><div class="kpi-label">Streaks (W/L)</div><div class="kpi-value">{{ kpi_streaks.win }}/{{ kpi_streaks.loss }}</div></div>
+    <div class="kpi"><div class="kpi-label">Direction Mix</div><div class="kpi-value">BUY {{ kpi_dir_mix.buy_pct|floatformat:0 }}% / SELL {{ kpi_dir_mix.sell_pct|floatformat:0 }}%</div></div>
+    <div class="kpi">
+      <div class="kpi-label">Cum PnL (All)</div>
+      <svg width="{{ spark_overall.w }}" height="{{ spark_overall.h }}" class="spark">
+        <line x1="0" y1="{{ spark_overall.zero_y }}" x2="{{ spark_overall.w }}" y2="{{ spark_overall.zero_y }}" class="spark-zero"/>
+        <path d="{{ spark_overall.path }}" class="spark-line all"/>
+      </svg>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Cum PnL (Buy)</div>
+      <svg width="{{ spark_buy.w }}" height="{{ spark_buy.h }}" class="spark">
+        <line x1="0" y1="{{ spark_buy.zero_y }}" x2="{{ spark_buy.w }}" y2="{{ spark_buy.zero_y }}" class="spark-zero"/>
+        <path d="{{ spark_buy.path }}" class="spark-line buy"/>
+      </svg>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Cum PnL (Sell)</div>
+      <svg width="{{ spark_sell.w }}" height="{{ spark_sell.h }}" class="spark">
+        <line x1="0" y1="{{ spark_sell.zero_y }}" x2="{{ spark_sell.w }}" y2="{{ spark_sell.zero_y }}" class="spark-zero"/>
+        <path d="{{ spark_sell.path }}" class="spark-line sell"/>
+      </svg>
+    </div>
   </div>
 
-  <form method="get" style="background:#f8f9fa; padding:1rem; border-radius:8px; margin:1rem 0;">
-    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem;">
+  {% if rules_clean %}
+  <div class="rules-box card-flat">
+    <div class="rules-head">Trading Rules</div>
+    <pre class="rules-pre">{{ rules_clean }}</pre>
+  </div>
+  {% endif %}
+
+  <form method="get" class="form-pro">
+    <div class="form-pro-grid">
       <div>
-        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Trading System</label>
-        <select name="system" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;">
+        <label class="form-pro-label">Trading System</label>
+        <select name="system" class="form-pro-control">
           {% for s in systems %}
             <option value="{{ s.id }}" {% if selected_system and selected_system.id == s.id %}selected{% endif %}>{{ s.system_sid }} ({{ s.symbol }})</option>
           {% endfor %}
         </select>
       </div>
       <div>
-        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Base TF Level</label>
-        <input type="number" name="tf" value="{{ base_level }}" min="1" step="1" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;" />
+        <label class="form-pro-label">Base TF Level</label>
+        <input type="number" name="tf" value="{{ base_level }}" min="1" step="1" class="form-pro-control" />
       </div>
       <div>
-        <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Max events</label>
-        <input type="number" name="limit" value="200" min="20" step="20" style="width:100%; padding:0.5rem; border:1px solid #ddd; border-radius:4px;" />
+        <label class="form-pro-label">Max events</label>
+        <input type="number" name="limit" value="200" min="20" step="20" class="form-pro-control" />
       </div>
-      <div style="display:flex; align-items:end;"><button class="btn btn-primary" style="width:100%;">Apply</button></div>
+      <div class="form-pro-action"><button class="btn btn-pro" style="width:100%;">Apply</button></div>
     </div>
   </form>
 
-  <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:hidden;">
+  <div class="table-pro">
     <table class="table">
       <thead>
         <tr style="background:#f8f9fa;">
@@ -83,5 +118,7 @@
   </div>
 </div>
 
-<div class="card"><div style="padding:0.75rem 1rem; color:#6c757d;">Tip: history is built from Signal Events as a reversal system.</div></div>
+<div class="card card-flat" style="padding:0.75rem 1rem;">
+  <div class="text-subtle">Tip: history is built from Signal Events as a reversal system.</div>
+</div>
 {% endblock %}

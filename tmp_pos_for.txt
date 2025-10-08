@@ -1,0 +1,121 @@
+    def get_open_positions_for(self, symbol: Optional[str] = None, magic: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Filter open positions by symbol and/or magic."""
+        allp = self.get_open_positions() or []
+        res = []
+        for p in allp:
+            if symbol and p.get('symbol') != symbol:
+                continue
+            if magic is not None and p.get('magic') != magic:
+                continue
+            res.append(p)
+        return res
+
+    # --- Trading actions ---
+    def _ensure_symbol(self, symbol: str) -> bool:
+        try:
+            info = mt5.symbol_info(symbol)
+            if info and info.visible:
+                return True
+            # Try to select even if info is None (symbol might be hidden)
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+            info2 = mt5.symbol_info(symbol)
+            if info2 and info2.visible:
+                return True
+            # Fallback: attempt case-insensitive or suffix match (e.g., EURUSD.r)
+            try:
+                allsyms = mt5.symbols_get()
+            except Exception:
+                allsyms = None
+            if allsyms:
+                target = symbol.upper()
+                cand = None
+                for s in allsyms:
+                    if getattr(s, 'name', '').upper() == target:
+                        cand = s.name
+                        break
+                if not cand:
+                    for s in allsyms:
+                        n = getattr(s, 'name', '').upper()
+                        if n.startswith(target):
+                            cand = s.name
+                            break
+                if cand:
+                    try:
+                        mt5.symbol_select(cand, True)
+                    except Exception:
+                        pass
+                    info3 = mt5.symbol_info(cand)
+                    if info3 and info3.visible:
+                        return True
+            return False
+        except Exception:
+            return False
+
+    def _resolve_trade_symbol(self, symbol: str) -> Optional[str]:
+        """Return a visible symbol name suitable for trading.
+
+        Tries the provided name, and if not available, searches for a case-insensitive
+        or suffix-matching variant (e.g., EURUSD.r). Ensures the symbol is selected.
+        """
+        try:
+            info = mt5.symbol_info(symbol)
+            if info and info.visible:
+                return symbol
+            # Try to select the provided as-is
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+            info2 = mt5.symbol_info(symbol)
+            if info2 and info2.visible:
+                return symbol
+            # Scan available symbols for a match
+            try:
+                allsyms = mt5.symbols_get()
+            except Exception:
+                allsyms = None
+            if allsyms:
+                target = symbol.upper()
+                for s in allsyms:
+                    if getattr(s, 'name', '').upper() == target:
+                        mt5.symbol_select(s.name, True)
+                        return s.name
+                for s in allsyms:
+                    n = getattr(s, 'name', '').upper()
+                    if n.startswith(target):
+                        mt5.symbol_select(s.name, True)
+                        return s.name
+            return None
+        except Exception:
+            return None
+
+    def _get_tick(self, symbol: str) -> Optional[Any]:
+        try:
+            return mt5.symbol_info_tick(symbol)
+        except Exception:
+            return None
+
+    def _filling_candidates(self, symbol: str) -> List[int]:
+        cands: List[int] = []
+        for name in ('ORDER_FILLING_RETURN', 'ORDER_FILLING_IOC', 'ORDER_FILLING_FOK'):
+            val = getattr(mt5, name, None)
+            if isinstance(val, int) and val not in cands:
+                cands.append(val)
+        if not cands:
+            cands = [0, 1, 2]
+        return cands
+
+    def _order_send_with_filling(self, base_request: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+        last = None
+        for fill in self._filling_candidates(symbol):
+            req = dict(base_request)
+            req['type_filling'] = fill
+            try:
+                result = mt5.order_send(req)
+                retcode = getattr(result, 'retcode', None)
+                success = retcode == getattr(mt5, 'TRADE_RETCODE_DONE', 10009)
+                if success:
+                    return {
