@@ -435,7 +435,9 @@ class TradingSystemAdmin(admin.ModelAdmin):
         fields = ['level', 'feed']
         ordering = ['level']
 
-    inlines = [TimeFrameInline, TFBindingInline, SignalSettingsInline]
+    # In global-feed mode, legacy per-system TimeFrame is confusing and minute-only.
+    # Show only TF bindings (Feed ↔ Level), which include tick TF codes (T200, T500, ...).
+    inlines = [TFBindingInline, SignalSettingsInline]
     actions = ['scan_global_files', 'import_global_pending', 'wipe_global_market_data', 'reset_and_reimport', 'generate_signals_now']
     
     def system_status_icon(self, obj):

@@ -1311,11 +1311,35 @@ def trading_history_ts(request):
     cur_price = None
     if system:
         try:
-            min_bind = TradingSystemTFBinding.objects.filter(trading_system=system).select_related('feed__tfcode').order_by('feed__tfcode__minutes').first()
+            # Prefer the finest resolution feed among bindings:
+            # - Tick TFs (code starts with 'T') before minute TFs
+            # - For ticks: smaller tick count (e.g., T200 < T500)
+            # - For minutes: smaller minutes value (M1 < M2 < M5 ...)
+            binds = list(TradingSystemTFBinding.objects.filter(trading_system=system).select_related('feed__tfcode'))
+
+            def _rank(b):
+                try:
+                    code = (b.feed.tfcode.code or '').upper()
+                except Exception:
+                    code = ''
+                if code.startswith('T'):
+                    try:
+                        ticks = int(code[1:])
+                    except Exception:
+                        ticks = 10**9
+                    return (0, ticks)
+                # minute-based
+                try:
+                    mins = int(getattr(b.feed.tfcode, 'minutes', None) or 999999)
+                except Exception:
+                    mins = 999999
+                return (1, mins)
+
             use_feed = None
-            if min_bind:
-                use_feed = min_bind.feed
-            else:
+            if binds:
+                binds.sort(key=_rank)
+                use_feed = binds[0].feed
+            if not use_feed:
                 # fallback to base-level binding
                 b0 = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
                 use_feed = getattr(b0, 'feed', None)
