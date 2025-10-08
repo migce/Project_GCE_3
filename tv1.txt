@@ -1,0 +1,137 @@
+    systems = list(TradingSystem.objects.all().order_by('system_sid'))
+    system_id = request.GET.get('system')
+    tf_level = request.GET.get('tf')
+    # No max events limit anymore – use full signal history
+
+    system = None
+    if system_id:
+        try:
+            system = TradingSystem.objects.get(id=system_id)
+        except TradingSystem.DoesNotExist:
+            system = None
+    if not system and systems:
+        system = systems[0]
+
+    trades = []
+    total_pips = 0.0
+    wins = 0
+    total = 0
+    selected_tf = None
+    base_level = 1
+    if system:
+        try:
+            base_level = getattr(system, 'signal_settings', None).signal_base_tf_level or 1
+        except Exception:
+            base_level = 1
+        if tf_level:
+            try:
+                base_level = int(tf_level)
+            except Exception:
+                pass
+        # Keep selected_tf only for display; events are filtered by level
+        selected_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+
+        # Use the same source as admin: persisted SignalEvent rows,
+        # additionally filtered by the bound feed for this TF level (if any).
+        qs = SignalEvent.objects.filter(trading_system=system, level=base_level)
+        try:
+            bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+            if bind and bind.feed_id:
+                qs = qs.filter(feed_id=bind.feed_id)
+        except Exception:
+            pass
+        evs = list(qs.order_by('event_time'))  # oldest→newest for sequential pairing
+
+        # Completed cycles stats (overall/buy/sell) within the same window as table
+        cycles_done_buy = cycles_done_sell = 0
+        side_count = {'BUY': 0, 'SELL': 0}
+        side_started = {'BUY': False, 'SELL': False}
+        for ev in evs:
+            act = getattr(ev, 'action', 'OPEN')
+            side = getattr(ev, 'direction', None)
+            if side not in ('BUY', 'SELL'):
+                continue
+            if act == 'OPEN':
+                if side_count[side] == 0:
+                    side_started[side] = True
+                side_count[side] += 1
+            else:  # CLOSE
+                if side_count[side] > 0:
+                    side_count[side] -= 1
+                    if side_count[side] == 0 and side_started[side]:
+                        if side == 'BUY':
+                            cycles_done_buy += 1
+                        else:
+                            cycles_done_sell += 1
+                        side_started[side] = False
+        cycles_done_all = cycles_done_buy + cycles_done_sell
+
+        pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
+        open_ev = None
+        for ev in evs:
+            action = getattr(ev, 'action', 'OPEN')
+            if action == 'OPEN':
+                if open_ev is None:
+                    open_ev = ev
+                else:
+                    # Treat as reversal ONLY if direction changes
+                    if ev.direction and open_ev.direction and ev.direction != open_ev.direction:
+                        close_ev = ev
+                        open_price = _get_close_for_event(open_ev)
+                        close_price = _get_close_for_event(close_ev)
+                        pnl = None
+                        if open_price is not None and close_price is not None:
+                            pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                            total_pips += pnl
+                            total += 1
+                            if pnl > 0:
+                                wins += 1
+                        trades.append({
+                            'open_time': open_ev.event_time,
+                            'open_dir': open_ev.direction,
+                            'open_price': open_price,
+                            'open_id': getattr(open_ev, 'id', None),
+                            'close_time': close_ev.event_time,
+                            'close_price': close_price,
+                            'close_id': getattr(close_ev, 'id', None),
+                            'pips': pnl,
+                        })
+                        open_ev = ev  # start new trade after reversal
+                    else:
+                        # Same-direction OPEN: do not close, keep earliest open as the trade anchor
+                        pass
+            else:  # CLOSE
+                if open_ev is not None:
+                    close_ev = ev
+                    open_price = _get_close_for_event(open_ev)
+                    close_price = _get_close_for_event(close_ev)
+                    pnl = None
+                    if open_price is not None and close_price is not None:
+                        pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                        total_pips += pnl
+                        total += 1
+                        if pnl > 0:
+                            wins += 1
+                    trades.append({
+                        'open_time': open_ev.event_time,
+                        'open_dir': open_ev.direction,
+                        'open_price': open_price,
+                        'open_id': getattr(open_ev, 'id', None),
+                        'close_time': close_ev.event_time,
+                        'close_price': close_price,
+                        'close_id': getattr(close_ev, 'id', None),
+                        'pips': pnl,
+                    })
+                    open_ev = None
+
+    # Compute currently open positions (no Close yet)
+    open_stack = []
+    for ev in evs:
+        act = getattr(ev, 'action', 'OPEN')
+        if act == 'OPEN':
+            if not open_stack:
+                open_stack.append(ev)
+            else:
+                if open_stack[-1].direction and ev.direction and open_stack[-1].direction != ev.direction:
+                    # Reversal: close all previous and start new stack with this OPEN
+                    open_stack = [ev]

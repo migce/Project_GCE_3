@@ -1,0 +1,437 @@
+    systems = list(TradingSystem.objects.all().order_by('system_sid'))
+    system_id = request.GET.get('system')
+    tf_level = request.GET.get('tf')
+    # No max events limit anymore – use full signal history
+
+    system = None
+    if system_id:
+        try:
+            system = TradingSystem.objects.get(id=system_id)
+        except TradingSystem.DoesNotExist:
+            system = None
+    if not system and systems:
+        system = systems[0]
+
+    trades = []
+    total_pips = 0.0
+    wins = 0
+    total = 0
+    selected_tf = None
+    base_level = 1
+    if system:
+        try:
+            base_level = getattr(system, 'signal_settings', None).signal_base_tf_level or 1
+        except Exception:
+            base_level = 1
+        if tf_level:
+            try:
+                base_level = int(tf_level)
+            except Exception:
+                pass
+        # Keep selected_tf only for display; events are filtered by level
+        selected_tf = TimeFrame.objects.filter(trading_system=system, level=base_level).first()
+
+        # Use the same source as admin: persisted SignalEvent rows,
+        # additionally filtered by the bound feed for this TF level (if any).
+        qs = SignalEvent.objects.filter(trading_system=system, level=base_level)
+        try:
+            bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+            if bind and bind.feed_id:
+                qs = qs.filter(feed_id=bind.feed_id)
+        except Exception:
+            pass
+        evs = list(qs.order_by('event_time'))  # oldest→newest for sequential pairing
+
+        # Completed cycles stats (overall/buy/sell) within the same window as table
+        cycles_done_buy = cycles_done_sell = 0
+        side_count = {'BUY': 0, 'SELL': 0}
+        side_started = {'BUY': False, 'SELL': False}
+        for ev in evs:
+            act = getattr(ev, 'action', 'OPEN')
+            side = getattr(ev, 'direction', None)
+            if side not in ('BUY', 'SELL'):
+                continue
+            if act == 'OPEN':
+                if side_count[side] == 0:
+                    side_started[side] = True
+                side_count[side] += 1
+            else:  # CLOSE
+                if side_count[side] > 0:
+                    side_count[side] -= 1
+                    if side_count[side] == 0 and side_started[side]:
+                        if side == 'BUY':
+                            cycles_done_buy += 1
+                        else:
+                            cycles_done_sell += 1
+                        side_started[side] = False
+        cycles_done_all = cycles_done_buy + cycles_done_sell
+
+        pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
+        open_ev = None
+        for ev in evs:
+            action = getattr(ev, 'action', 'OPEN')
+            if action == 'OPEN':
+                if open_ev is None:
+                    open_ev = ev
+                else:
+                    # Treat as reversal ONLY if direction changes
+                    if ev.direction and open_ev.direction and ev.direction != open_ev.direction:
+                        close_ev = ev
+                        open_price = _get_close_for_event(open_ev)
+                        close_price = _get_close_for_event(close_ev)
+                        pnl = None
+                        if open_price is not None and close_price is not None:
+                            pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                            total_pips += pnl
+                            total += 1
+                            if pnl > 0:
+                                wins += 1
+                        trades.append({
+                            'open_time': open_ev.event_time,
+                            'open_dir': open_ev.direction,
+                            'open_price': open_price,
+                            'open_id': getattr(open_ev, 'id', None),
+                            'close_time': close_ev.event_time,
+                            'close_price': close_price,
+                            'close_id': getattr(close_ev, 'id', None),
+                            'pips': pnl,
+                        })
+                        open_ev = ev  # start new trade after reversal
+                    else:
+                        # Same-direction OPEN: do not close, keep earliest open as the trade anchor
+                        pass
+            else:  # CLOSE
+                if open_ev is not None:
+                    close_ev = ev
+                    open_price = _get_close_for_event(open_ev)
+                    close_price = _get_close_for_event(close_ev)
+                    pnl = None
+                    if open_price is not None and close_price is not None:
+                        pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
+                        total_pips += pnl
+                        total += 1
+                        if pnl > 0:
+                            wins += 1
+                    trades.append({
+                        'open_time': open_ev.event_time,
+                        'open_dir': open_ev.direction,
+                        'open_price': open_price,
+                        'open_id': getattr(open_ev, 'id', None),
+                        'close_time': close_ev.event_time,
+                        'close_price': close_price,
+                        'close_id': getattr(close_ev, 'id', None),
+                        'pips': pnl,
+                    })
+                    open_ev = None
+
+    # Compute currently open positions (no Close yet)
+    open_stack = []
+    for ev in evs:
+        act = getattr(ev, 'action', 'OPEN')
+        if act == 'OPEN':
+            if not open_stack:
+                open_stack.append(ev)
+            else:
+                if open_stack[-1].direction and ev.direction and open_stack[-1].direction != ev.direction:
+                    # Reversal: close all previous and start new stack with this OPEN
+                    open_stack = [ev]
+                else:
+                    # Same direction: treat as additional open position
+                    open_stack.append(ev)
+        else:  # CLOSE
+            # Remove all positions of that side
+            side = ev.direction
+            open_stack = [x for x in open_stack if x.direction != side]
+
+    # Determine current price from the smallest TF feed bound to this system
+    cur_price = None
+    if system:
+        try:
+            # Prefer the finest resolution feed among bindings:
+            # - Tick TFs (code starts with 'T') before minute TFs
+            # - For ticks: smaller tick count (e.g., T200 < T500)
+            # - For minutes: smaller minutes value (M1 < M2 < M5 ...)
+            binds = list(TradingSystemTFBinding.objects.filter(trading_system=system).select_related('feed__tfcode'))
+
+            def _rank(b):
+                try:
+                    code = (b.feed.tfcode.code or '').upper()
+                except Exception:
+                    code = ''
+                if code.startswith('T'):
+                    try:
+                        ticks = int(code[1:])
+                    except Exception:
+                        ticks = 10**9
+                    return (0, ticks)
+                # minute-based
+                try:
+                    mins = int(getattr(b.feed.tfcode, 'minutes', None) or 999999)
+                except Exception:
+                    mins = 999999
+                return (1, mins)
+
+            use_feed = None
+            if binds:
+                binds.sort(key=_rank)
+                use_feed = binds[0].feed
+            if not use_feed:
+                # fallback to base-level binding
+                b0 = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+                use_feed = getattr(b0, 'feed', None)
+            if use_feed:
+                last_bar = MarketBar.objects.filter(feed=use_feed).only('close').order_by('-dt').first()
+                if last_bar and last_bar.close is not None:
+                    cur_price = float(last_bar.close)
+        except Exception:
+            cur_price = None
+
+    open_positions = []
+    for oe in open_stack:
+        op = float(_get_close_for_event(oe) or 0)
+        unreal = None
+        if cur_price is not None and op:
+            if oe.direction == 'BUY':
+                unreal = (cur_price - op) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
+            else:
+                unreal = (op - cur_price) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
+        open_positions.append({
+            'open_time': oe.event_time,
+            'open_dir': oe.direction,
+            'open_price': op if op else None,
+            'cur_price': cur_price,
+            'open_pnl': unreal,
+            'open_id': getattr(oe, 'id', None),
+        })
+
+    # Build cumulative PnL series from closed trades for sparklines
+    vals_all = []
+    vals_buy = []
+    vals_sell = []
+    s_all = s_buy = s_sell = 0.0
+    for t in trades:
+        p = float(t.get('pips') or 0.0)
+        s_all += p; vals_all.append(s_all)
+        if t.get('open_dir') == 'BUY':
+            s_buy += p
+        if t.get('open_dir') == 'SELL':
+            s_sell += p
+        vals_buy.append(s_buy)
+        vals_sell.append(s_sell)
+
+    # Overlay additions for sparklines and KPI Open PnL
+    open_all_add = sum((p.get('open_pnl') or 0.0) for p in open_positions)
+    open_buy_add = sum((p.get('open_pnl') or 0.0) for p in open_positions if p.get('open_dir') == 'BUY')
+    open_sell_add = sum((p.get('open_pnl') or 0.0) for p in open_positions if p.get('open_dir') == 'SELL')
+
+    # Local helper to build sparkline path and dashed overlay
+    def _spark(values, overlay_last=None, width=120, height=30, pad=2):
+        if not values:
+            return {'w': width, 'h': height, 'path': '', 'overlay': '', 'zero_y': height - pad}
+        n = len(values)
+        if n == 1:
+            values = [0.0, values[0]]; n = 2
+        vmin = min(values)
+        vmax = max(values)
+        if overlay_last is not None:
+            vmin = min(vmin, overlay_last)
+            vmax = max(vmax, overlay_last)
+        if vmin == vmax:
+            vmin -= 1.0; vmax += 1.0
+        sx = (width - 2*pad) / (n - 1)
+        sy = (height - 2*pad) / (vmax - vmin)
+        parts = []
+        for i, v in enumerate(values):
+            x = pad + i * sx
+            y = height - pad - (v - vmin) * sy
+            parts.append(f"{'M' if i==0 else 'L'}{x:.1f},{y:.1f}")
+        y0 = height - pad - (0 - vmin) * sy
+        overlay_path = ''
+        if overlay_last is not None:
+            x_last = pad + (n - 1) * sx
+            y_last = height - pad - (values[-1] - vmin) * sy
+            x_new = width - pad
+            y_new = height - pad - (overlay_last - vmin) * sy
+            overlay_path = f"M{x_last:.1f},{y_last:.1f} L{x_new:.1f},{y_new:.1f}"
+        return {'w': width, 'h': height, 'path': ' '.join(parts), 'overlay': overlay_path, 'zero_y': f"{y0:.1f}"}
+
+    spark_overall = _spark(vals_all, (vals_all[-1] + open_all_add) if vals_all else open_all_add)
+    spark_buy = _spark(vals_buy, (vals_buy[-1] + open_buy_add) if vals_buy else open_buy_add)
+    spark_sell = _spark(vals_sell, (vals_sell[-1] + open_sell_add) if vals_sell else open_sell_add)
+
+    # No slicing: keep all simulated trades
+    win_rate = (wins / total * 100.0) if total else 0.0
+
+    # --- Extended KPIs ---
+    gross_profit = sum((t.get('pips') or 0) for t in trades if (t.get('pips') or 0) > 0)
+    gross_loss_abs = sum(-(t.get('pips') or 0) for t in trades if (t.get('pips') or 0) < 0)
+    loss_count = max(0, total - wins)
+    avg_win = (gross_profit / wins) if wins else 0.0
+    avg_loss_abs = (gross_loss_abs / loss_count) if loss_count else 0.0
+    profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 1e-9 else None
+    payoff = (avg_win / avg_loss_abs) if avg_loss_abs > 1e-9 else None
+    expectancy = 0.0
+    if total:
+        expectancy = (wins / total) * avg_win - (loss_count / total) * avg_loss_abs
+
+    # Max drawdown (pips) from cumulative curve (negative number)
+    cum = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for t in trades:
+        cum += float(t.get('pips') or 0)
+        if cum > peak:
+            peak = cum
+        dd = cum - peak
+        if dd < max_dd:
+            max_dd = dd
+
+    # Avg duration
+    import math
+    durs = []
+    for t in trades:
+        ot = t.get('open_time'); ct = t.get('close_time')
+        if ot and ct:
+            try:
+                durs.append((ct - ot).total_seconds())
+            except Exception:
+                pass
+    avg_dur_s = (sum(durs) / len(durs)) if durs else 0
+    def _fmt_dur(secs: float) -> str:
+        s = int(secs)
+        d, s = divmod(s, 86400)
+        h, s = divmod(s, 3600)
+        m, _ = divmod(s, 60)
+        if d > 0:
+            return f"{d}d {h:02d}h"
+        if h > 0:
+            return f"{h}h {m:02d}m"
+        return f"{m}m"
+    avg_duration_hm = _fmt_dur(avg_dur_s)
+
+    # Streaks (wins/losses)
+    cur_w = cur_l = 0
+    max_w = max_l = 0
+    for t in trades:
+        p = t.get('pips') or 0
+        if p > 0:
+            cur_w += 1; cur_l = 0
+        elif p < 0:
+            cur_l += 1; cur_w = 0
+        else:
+            cur_w = cur_l = 0
+        if cur_w > max_w: max_w = cur_w
+        if cur_l > max_l: max_l = cur_l
+
+    # Direction mix
+    buy_cnt = sum(1 for t in trades if (t.get('open_dir') == 'BUY'))
+    sell_cnt = sum(1 for t in trades if (t.get('open_dir') == 'SELL'))
+    tot_dirs = max(1, buy_cnt + sell_cnt)
+    buy_pct = buy_cnt / tot_dirs * 100.0
+    sell_pct = sell_cnt / tot_dirs * 100.0
+
+    # Cumulative PnL series for sparklines (overall, buy-only, sell-only)
+    vals_all = []
+    vals_buy = []
+    vals_sell = []
+    s_all = s_buy = s_sell = 0.0
+    for t in trades:
+        p = float(t.get('pips') or 0.0)
+        s_all += p; vals_all.append(s_all)
+        if t.get('open_dir') == 'BUY':
+            s_buy += p
+        if t.get('open_dir') == 'SELL':
+            s_sell += p
+        vals_buy.append(s_buy)
+        vals_sell.append(s_sell)
+
+    def _spark(values, overlay_last=None, width=120, height=30, pad=2):
+        if not values:
+            return {'w': width, 'h': height, 'path': '', 'overlay': '', 'zero_y': height - pad}
+        n = len(values)
+        if n == 1:
+            values = [0.0, values[0]]; n = 2
+        vmin = min(values)
+        vmax = max(values)
+        if overlay_last is not None:
+            vmin = min(vmin, overlay_last)
+            vmax = max(vmax, overlay_last)
+        if vmin == vmax:
+            vmin -= 1.0; vmax += 1.0
+        sx = (width - 2*pad) / (n - 1)
+        sy = (height - 2*pad) / (vmax - vmin)
+        parts = []
+        for i, v in enumerate(values):
+            x = pad + i * sx
+            y = height - pad - (v - vmin) * sy
+            parts.append(f"{'M' if i==0 else 'L'}{x:.1f},{y:.1f}")
+        # zero line position
+        y0 = height - pad - (0 - vmin) * sy
+        # overlay as dashed segment from last point to synthetic point n
+        overlay_path = ''
+        if overlay_last is not None:
+            x_last = pad + (n - 1) * sx
+            y_last = height - pad - (values[-1] - vmin) * sy
+            x_new = width - pad  # extend to chart right edge
+            y_new = height - pad - (overlay_last - vmin) * sy
+            overlay_path = f"M{x_last:.1f},{y_last:.1f} L{x_new:.1f},{y_new:.1f}"
+        return {'w': width, 'h': height, 'path': ' '.join(parts), 'overlay': overlay_path, 'zero_y': f"{y0:.1f}"}
+
+    # Calculate unrealized additions to cumulative series
+    open_all_add = sum((p.get('open_pnl') or 0.0) for p in [])
+    # We will fill from open_positions built below; initialize now
+    open_all_add = 0.0
+    open_buy_add = 0.0
+    open_sell_add = 0.0
+
+    # Rules text (cleaned): drop empty and commented lines
+    rules_clean = ''
+    try:
+        if system and getattr(system, 'signal_settings', None):
+            raw = system.signal_settings.signal_logic or ''
+            lines = []
+            for ln in (raw.splitlines() if raw else []):
+                s = ln.strip()
+                if not s or s.startswith('#'):
+                    continue
+                lines.append(s)
+            rules_clean = "\n".join(lines)
+    except Exception:
+        rules_clean = ''
+
+    context = {
+        'systems': systems,
+        'selected_system': system,
+        'selected_tf': selected_tf,
+        'base_level': base_level,
+        'trades': list(reversed(trades)),
+        'total_pips': total_pips,
+        'win_rate': win_rate,
+        'total_trades': total,
+        # Extended KPIs
+        'kpi_profit_factor': profit_factor,
+        'kpi_payoff': payoff,
+        'kpi_expectancy': expectancy,
+        'kpi_max_dd': max_dd,
+        'kpi_avg_duration': avg_duration_hm,
+        'kpi_streaks': {'win': max_w, 'loss': max_l},
+        'kpi_dir_mix': {'buy_pct': buy_pct, 'sell_pct': sell_pct},
+        'kpi_open_pnl': sum((p.get('open_pnl') or 0.0) for p in open_positions),
+        'kpi_cycles': {'all': cycles_done_all, 'buy': cycles_done_buy, 'sell': cycles_done_sell},
+        'spark_overall': spark_overall,
+        'spark_buy': spark_buy,
+        'spark_sell': spark_sell,
+        'rules_clean': rules_clean,
+        'open_positions': open_positions,
+    }
+    return render(request, 'main/trading_history_ts.html', context)
+
+
+def trading_history_mt5(request):
+    systems = list(MT5ConnectionSettings.objects.all().order_by('-is_default', 'name'))
+    systems_magic = list(TradingSystem.objects.filter(magic_number__isnull=False).order_by('system_sid'))
+    settings_id = request.GET.get('conn')
+    sys_magic_id = request.GET.get('sys')
+    days = int(request.GET.get('days') or 7)
+    selected = None
+    if settings_id:

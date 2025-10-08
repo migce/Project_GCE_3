@@ -665,6 +665,17 @@ body {
 .spark-overlay.buy { stroke:#166534; }
 .spark-overlay.sell { stroke:#991b1b; }
 
+/* Price chart (base TF) */
+.price-svg .bar { stroke:#9aa0a6; stroke-width:1; }
+.price-svg .mk { stroke-width:1.2; }
+.price-svg .mk.buy-open { fill:#15803d; stroke:#0a5a28; }
+.price-svg .mk.sell-open { fill:#991b1b; stroke:#7f1d1d; }
+.price-svg .mk.buy-close { fill:#ffffff; stroke:#15803d; }
+.price-svg .mk.sell-close { fill:#ffffff; stroke:#991b1b; }
+.price-chart-block { position: relative; }
+.price-chart-block .pc-legend { pointer-events:none; }
+.price-svg .pc-cross line { stroke:#6b7280; stroke-width:1; stroke-dasharray:4 3; }
+
 /* Rules box */
 .rules-box { width:100%; border:1px solid #e6e9ee; border-radius:8px; background:#fff; margin:6px 0 16px; }
 .rules-head { font-size:.78rem; color:#4b5563; padding:8px 10px; border-bottom:1px solid #e6e9ee; text-transform:uppercase; letter-spacing:.04em; }

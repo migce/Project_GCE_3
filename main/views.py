@@ -1548,6 +1548,70 @@ def trading_history_ts(request):
     open_buy_add = 0.0
     open_sell_add = 0.0
 
+    # Build OHLC bars chart for base TF (last ~240 bars)
+    price_chart = None
+    try:
+        chart_bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+        if chart_bind and chart_bind.feed_id:
+            N = 240
+            bars = list(MarketBar.objects.filter(feed=chart_bind.feed).order_by('-dt')[:N])
+            bars.reverse()
+            if bars:
+                highs = [float(b.high) for b in bars]
+                lows = [float(b.low) for b in bars]
+                pmax = max(highs); pmin = min(lows)
+                if pmax == pmin:
+                    pmax += 1e-6
+                w = 900; h = 220; pad = 6
+                n = len(bars)
+                sx = (w - 2*pad) / max(1, (n - 1))
+                tw = max(2.0, min(6.0, sx * 0.35))  # open/close tick length
+                def y_of(v: float) -> float:
+                    sy = (h - 2*pad) / (pmax - pmin)
+                    return h - pad - (v - pmin) * sy
+                out = []
+                time_to_x = {}
+                dts = []
+                for i, b in enumerate(bars):
+                    try:
+                        x = pad + i * sx
+                        yh = y_of(float(b.high)); yl = y_of(float(b.low))
+                        yo = y_of(float(b.open)); yc = y_of(float(b.close))
+                        out.append({'x': f"{x:.1f}", 'yh': f"{yh:.1f}", 'yl': f"{yl:.1f}",
+                                    'yo': f"{yo:.1f}", 'yc': f"{yc:.1f}",
+                                    'xl': f"{(x - tw):.1f}", 'xr': f"{(x + tw):.1f}"})
+                        time_to_x[getattr(b, 'dt')] = x
+                        try:
+                            dts.append(getattr(b, 'dt').strftime('%Y-%m-%d %H:%M:%S'))
+                        except Exception:
+                            dts.append(str(getattr(b, 'dt')))
+                    except Exception:
+                        continue
+                # Markers for signals aligned to bar times
+                markers = []
+                try:
+                    for ev in evs:
+                        dt_e = getattr(ev, 'event_time', None)
+                        if dt_e in time_to_x:
+                            x = time_to_x[dt_e]
+                            # y at open for OPEN, at close for CLOSE
+                            # Find corresponding bar again by dt
+                            mb = next((b for b in bars if getattr(b, 'dt') == dt_e), None)
+                            if not mb:
+                                continue
+                            y = y_of(float(mb.close if getattr(ev, 'action', 'OPEN') == 'CLOSE' else mb.open))
+                            mtype = 'buy-open' if ev.action == 'OPEN' and ev.direction == 'BUY' else \
+                                    ('sell-open' if ev.action == 'OPEN' and ev.direction == 'SELL' else \
+                                     ('buy-close' if ev.action == 'CLOSE' and ev.direction == 'BUY' else \
+                                      ('sell-close' if ev.action == 'CLOSE' and ev.direction == 'SELL' else 'other')))
+                            markers.append({'cx': f"{x:.1f}", 'cy': f"{y:.1f}", 'klass': mtype})
+                except Exception:
+                    pass
+                price_chart = {'w': w, 'h': h, 'bars': out, 'markers': markers,
+                               'pmin': f"{pmin:.6f}", 'pmax': f"{pmax:.6f}", 'pad': pad, 'sx': f"{sx:.3f}", 'dts': dts}
+    except Exception:
+        price_chart = None
+
     # Rules text (cleaned): drop empty and commented lines
     rules_clean = ''
     try:
@@ -1587,6 +1651,7 @@ def trading_history_ts(request):
         'spark_sell': spark_sell,
         'rules_clean': rules_clean,
         'open_positions': open_positions,
+        'price_chart': price_chart,
     }
     return render(request, 'main/trading_history_ts.html', context)
 

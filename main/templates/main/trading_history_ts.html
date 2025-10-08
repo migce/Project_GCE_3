@@ -67,6 +67,66 @@
     </div>
   </div>
 
+  {% if price_chart %}
+  <div class="card card-flat price-chart-block" style="margin-top:0.5rem;">
+    <div class="rules-head">Base TF Price</div>
+    <div class="pc-legend" style="position:absolute; right:10px; top:6px; font-size:.8rem; color:#4b5563; background:rgba(255,255,255,.8); padding:2px 6px; border-radius:4px; display:none;"></div>
+    <svg class="price-svg" data-w="{{ price_chart.w }}" data-h="{{ price_chart.h }}" data-pad="{{ price_chart.pad }}" data-pmin="{{ price_chart.pmin }}" data-pmax="{{ price_chart.pmax }}" data-sx="{{ price_chart.sx }}" data-dts='{{ price_chart.dts|join:"," }}' viewBox="0 0 {{ price_chart.w }} {{ price_chart.h }}" preserveAspectRatio="xMidYMid meet" width="100%" height="240">
+      {% for b in price_chart.bars %}
+        <!-- vertical range -->
+        <line x1="{{ b.x }}" y1="{{ b.yh }}" x2="{{ b.x }}" y2="{{ b.yl }}" class="bar" />
+        <!-- open tick (left) -->
+        <line x1="{{ b.xl }}" y1="{{ b.yo }}" x2="{{ b.x }}" y2="{{ b.yo }}" class="bar" />
+        <!-- close tick (right) -->
+        <line x1="{{ b.x }}" y1="{{ b.yc }}" x2="{{ b.xr }}" y2="{{ b.yc }}" class="bar" />
+      {% endfor %}
+      {% for m in price_chart.markers %}
+        <circle cx="{{ m.cx }}" cy="{{ m.cy }}" r="3.2" class="mk {{ m.klass }}" />
+      {% endfor %}
+      <g class="pc-cross" style="display:none;">
+        <line class="cross-h" x1="0" y1="0" x2="{{ price_chart.w }}" y2="0" />
+        <line class="cross-v" x1="0" y1="0" x2="0" y2="{{ price_chart.h }}" />
+      </g>
+    </svg>
+    <script>
+      (function(){
+        var wrap = document.currentScript.previousElementSibling.previousElementSibling; // svg is previous, legend before it
+        var svg = wrap.nextElementSibling; // actually our svg element is next after legend div
+        if(!svg || !svg.classList.contains('price-svg')) return;
+        var legend = wrap;
+        // Adjust DOM references
+        legend = svg.previousElementSibling;
+        var w = parseFloat(svg.dataset.w || svg.getAttribute('viewBox').split(' ')[2]);
+        var h = parseFloat(svg.dataset.h || svg.getAttribute('viewBox').split(' ')[3]);
+        var pad = parseFloat(svg.dataset.pad || 6);
+        var pmin = parseFloat(svg.dataset.pmin);
+        var pmax = parseFloat(svg.dataset.pmax);
+        var sx = parseFloat(svg.dataset.sx);
+        var dts = (svg.dataset.dts || '').split(',');
+        var cross = svg.querySelector('.pc-cross');
+        var hline = cross.querySelector('.cross-h');
+        var vline = cross.querySelector('.cross-v');
+        function show(evt){ cross.style.display=''; legend.style.display=''; move(evt); }
+        function hide(){ cross.style.display='none'; legend.style.display='none'; }
+        function move(evt){
+          var pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY;
+          var loc = pt.matrixTransform(svg.getScreenCTM().inverse());
+          var x = Math.max(pad, Math.min(w-pad, loc.x));
+          var y = Math.max(pad, Math.min(h-pad, loc.y));
+          hline.setAttribute('x1', 0); hline.setAttribute('x2', w); hline.setAttribute('y1', y); hline.setAttribute('y2', y);
+          vline.setAttribute('y1', 0); vline.setAttribute('y2', h); vline.setAttribute('x1', x); vline.setAttribute('x2', x);
+          var idx = Math.round((x - pad)/sx); if(idx < 0) idx = 0; if(idx >= dts.length) idx = dts.length-1;
+          var price = pmax - ( (y - pad) * (pmax - pmin) / (h - 2*pad) );
+          legend.textContent = (dts[idx] || '-') + '  ' + price.toFixed(5);
+        }
+        svg.addEventListener('mouseenter', show);
+        svg.addEventListener('mousemove', move);
+        svg.addEventListener('mouseleave', hide);
+      })();
+    </script>
+  </div>
+  {% endif %}
+
   {% if rules_clean %}
   <div class="rules-box card-flat">
     <div class="rules-head">Trading Rules</div>
