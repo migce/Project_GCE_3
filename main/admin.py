@@ -16,7 +16,7 @@ from .models import (
 )
 from .models import (
     Instrument, TFCode, DataFeed, MarketBar, MarketIndicatorDef, MarketIndicatorValue, MarketDataFile,
-    TradingSystemTFBinding,
+    TradingSystemTFBinding, MarketImportError,
 )
 
 # Register your models here.
@@ -268,7 +268,8 @@ class MT5MonitoringSettingsAdmin(admin.ModelAdmin):
     
     list_display = [
         'status_icon', 'monitoring_enabled', 'auto_reconnect_enabled',
-        'health_check_interval', 'max_reconnect_attempts', 'updated_at'
+        'health_check_interval', 'max_reconnect_attempts', 'updated_at',
+        'store_changes_only'
     ]
     
     readonly_fields = [
@@ -283,6 +284,12 @@ class MT5MonitoringSettingsAdmin(admin.ModelAdmin):
             'fields': (
                 'health_check_interval', 'reconnect_interval', 
                 'max_reconnect_attempts'
+            )
+        }),
+        ('Logging/Throttling', {
+            'fields': (
+                'store_changes_only', 'min_record_interval_sec',
+                'snapshot_interval_connected_sec', 'ping_delta_threshold_ms'
             )
         }),
         ('Alert Settings', {
@@ -364,7 +371,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
         }),
         ('Конфигурация', {
             'fields': (
-                'timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number',
+                'timeframes_count', 'time_offset_minutes', 'data_dir', 'magic_number', 'spread_pips',
                 'is_active', 'trading_enabled', 'is_sar', 'lot_size'
             )
         }),
@@ -438,7 +445,7 @@ class TradingSystemAdmin(admin.ModelAdmin):
     # In global-feed mode, legacy per-system TimeFrame is confusing and minute-only.
     # Show only TF bindings (Feed ↔ Level), which include tick TF codes (T200, T500, ...).
     inlines = [TFBindingInline, SignalSettingsInline]
-    actions = ['scan_global_files', 'import_global_pending', 'wipe_global_market_data', 'reset_and_reimport', 'generate_signals_now']
+    actions = ['scan_global_files', 'import_global_pending', 'wipe_global_market_data', 'reset_and_reimport', 'generate_signals_now', 'duplicate_systems']
     
     def system_status_icon(self, obj):
         if obj.is_active:
@@ -537,9 +544,11 @@ class TradingSystemAdmin(admin.ModelAdmin):
     import_global_pending.short_description = 'Import global pending files'
 
     def wipe_global_market_data(self, request, queryset):
-        from django.db import transaction
-        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog
+        from django.db import transaction, OperationalError, close_old_connections
+        import time
+        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog, MarketImportError, DataIngestionStatus
         total_bars = total_vals = total_defs = total_signals = total_execs = 0
+        total_errs = 0
         with transaction.atomic():
             for system in queryset:
                 feeds = [b.feed_id for b in system.tf_bindings.all()]
@@ -561,9 +570,26 @@ class TradingSystemAdmin(admin.ModelAdmin):
                 sig_qs = SignalEvent.objects.filter(trading_system=system)
                 total_signals += sig_qs.count()
                 sig_qs.delete()
+                # Remove import error logs for files of these feeds
+                file_ids = list(MarketDataFile.objects.filter(feed_id__in=feeds).values_list('id', flat=True))
+                if file_ids:
+                    qs_err = MarketImportError.objects.filter(data_file_id__in=file_ids)
+                    total_errs += qs_err.count()
+                    qs_err.delete()
                 # Reset MarketDataFile status to pending to force re-import
                 MarketDataFile.objects.filter(feed_id__in=feeds).update(status='pending', processed_at=None)
-        self.message_user(request, f"Wiped global data for selected systems → Bars={total_bars}, IndicatorValues={total_vals}, IndicatorDefs={total_defs}, Signals={total_signals}, ExecLogs={total_execs}")
+            # Reset ingestion status counters (preserve active flag and interval)
+            try:
+                st = DataIngestionStatus.get()
+                st.last_run = None
+                st.files_scanned = 0
+                st.files_imported = 0
+                st.rows_imported = 0
+                st.last_error = ''
+                st.save(update_fields=['last_run', 'files_scanned', 'files_imported', 'rows_imported', 'last_error', 'updated_at'])
+            except Exception:
+                pass
+        self.message_user(request, f"Wiped global data for selected systems → Bars={total_bars}, IndicatorValues={total_vals}, IndicatorDefs={total_defs}, Signals={total_signals}, ExecLogs={total_execs}, ImportErrors={total_errs}")
         wipe_global_market_data.short_description = 'Wipe global market data for selected systems'
 
     def reset_and_reimport(self, request, queryset):
@@ -603,7 +629,8 @@ class TradingSystemAdmin(admin.ModelAdmin):
         Fully replaces existing SignalEvent records for each system to ensure
         consistency after rule changes.
         """
-        from django.db import transaction
+        from django.db import transaction, OperationalError, close_old_connections
+        import time
         from .services.signal_engine import generate_signals_for_system, diagnose_system_for_signals
         from .models import TimeFrame
         from .models import TradingSystemTFBinding, MarketBar
@@ -626,15 +653,23 @@ class TradingSystemAdmin(admin.ModelAdmin):
 
                 events = generate_signals_for_system(system, limit_bars=max(0, limit))
 
-                with transaction.atomic():
-                    # Replace existing signals for the system
-                    SignalEvent.objects.filter(trading_system=system).delete()
-                    if events:
-                        # Bulk create for speed
-                        SignalEvent.objects.bulk_create(events, batch_size=1000)
-                        saved = len(events)
-                    else:
-                        saved = 0
+                # Atomic replace with retry to mitigate transient SQLite locks
+                for attempt in range(3):
+                    try:
+                        close_old_connections()
+                        with transaction.atomic():
+                            SignalEvent.objects.filter(trading_system=system).delete()
+                            if events:
+                                SignalEvent.objects.bulk_create(events, batch_size=1000)
+                                saved = len(events)
+                            else:
+                                saved = 0
+                        break
+                    except OperationalError as oe:
+                        if 'locked' in str(oe).lower() and attempt < 2:
+                            time.sleep(0.2 * (attempt + 1))
+                            continue
+                        raise
                 total_saved += saved
                 if saved == 0:
                     diag = diagnose_system_for_signals(system, limit_bars=200)
@@ -647,6 +682,84 @@ class TradingSystemAdmin(admin.ModelAdmin):
         msg = f"Signals regenerated: {total_saved}. " + (" | ".join(details[:4]) + (" …" if len(details) > 4 else ""))
         self.message_user(request, msg)
     generate_signals_now.short_description = 'Сгенерировать сигналы сейчас'
+
+    # --- Duplicate Trading Systems ---
+    def duplicate_systems(self, request, queryset):
+        """Create copies of selected trading systems including TF bindings and signal settings.
+
+        - New system_sid: original + '-COPY' or '-COPYN' to keep unique
+        - New name: original + ' (Copy)'
+        - magic_number cleared (None) to avoid cross-system confusion
+        - trading_enabled set to False by default
+        - Copies TF bindings and Signal Settings; does NOT copy signals or market data
+        """
+        from django.db import transaction
+        from .models import TradingSystem, TradingSystemTFBinding, TradingSystemSignalSettings, TimeFrame
+
+        created = []
+
+        def unique_sid(base: str) -> str:
+            sid = f"{base}-COPY"
+            if not TradingSystem.objects.filter(system_sid=sid).exists():
+                return sid
+            n = 2
+            while TradingSystem.objects.filter(system_sid=f"{base}-COPY{n}").exists():
+                n += 1
+            return f"{base}-COPY{n}"
+
+        for src in queryset:
+            with transaction.atomic():
+                new_sid = unique_sid(src.system_sid)
+                clone = TradingSystem.objects.create(
+                    system_sid=new_sid,
+                    name=f"{src.name} (Copy)",
+                    symbol=src.symbol,
+                    timeframes_count=src.timeframes_count,
+                    time_offset_minutes=src.time_offset_minutes,
+                    is_active=False,
+                    trading_enabled=False,
+                    is_sar=src.is_sar,
+                    multiple_positions=getattr(src, 'multiple_positions', False),
+                    max_positions_per_side=getattr(src, 'max_positions_per_side', 5),
+                    lot_size=src.lot_size,
+                    description=src.description,
+                    data_dir=src.data_dir,
+                    magic_number=None,
+                )
+
+                # Copy TF bindings
+                binds = TradingSystemTFBinding.objects.filter(trading_system=src)
+                bulk = [TradingSystemTFBinding(trading_system=clone, level=b.level, feed=b.feed) for b in binds]
+                if bulk:
+                    TradingSystemTFBinding.objects.bulk_create(bulk)
+
+                # Copy legacy TimeFrames (if used)
+                tfs = TimeFrame.objects.filter(trading_system=src)
+                tf_bulk = [TimeFrame(trading_system=clone, timeframe=tf.timeframe, level=tf.level, is_active=tf.is_active) for tf in tfs]
+                if tf_bulk:
+                    TimeFrame.objects.bulk_create(tf_bulk)
+
+                # Copy signal settings
+                try:
+                    src_settings = src.signal_settings
+                except TradingSystemSignalSettings.DoesNotExist:
+                    src_settings = None
+                if src_settings:
+                    TradingSystemSignalSettings.objects.create(
+                        trading_system=clone,
+                        signal_logic=src_settings.signal_logic,
+                        signal_base_tf_level=src_settings.signal_base_tf_level,
+                        signal_indicators=src_settings.signal_indicators,
+                        use_global_feed=src_settings.use_global_feed,
+                    )
+
+                created.append(clone.system_sid)
+
+        if created:
+            self.message_user(request, f"Created copies: {', '.join(created[:5])}{' …' if len(created)>5 else ''}")
+        else:
+            self.message_user(request, "Nothing to copy.")
+    duplicate_systems.short_description = 'Копировать выбранные системы'
 
 
 @admin.register(TimeFrame)
@@ -736,6 +849,19 @@ class SignalExecutionLogAdmin(admin.ModelAdmin):
     short_message.short_description = 'Message'
 
 
+@admin.register(MarketImportError)
+class MarketImportErrorAdmin(admin.ModelAdmin):
+    list_display = ['created_at', 'data_file', 'row_number', 'column', 'short_message']
+    list_filter = ['data_file__feed', 'column']
+    search_fields = ['data_file__filename', 'message']
+    ordering = ['-created_at']
+
+    def short_message(self, obj):
+        msg = obj.message or ''
+        return (msg[:120] + '...') if len(msg) > 120 else msg
+    short_message.short_description = 'Message'
+
+
 
 # Настройка заголовков админ панели
 admin.site.site_header = "Project GCE 3 - Админ панель"
@@ -770,12 +896,23 @@ class DataFeedAdmin(admin.ModelAdmin):
 
 @admin.register(MarketDataFile)
 class MarketDataFileAdmin(admin.ModelAdmin):
-    list_display = ['provider', 'filename', 'feed', 'file_size', 'file_modified', 'status', 'processed_at']
+    list_display = ['provider', 'filename', 'feed', 'file_size', 'file_modified', 'status', 'processed_at', 'errors_link']
     list_filter = ['provider', 'status', 'feed']
     search_fields = ['filename']
     readonly_fields = ['created_at', 'processed_at']
     actions = ['scan_global_dir', 'import_all_pending', 'wipe_all_global', 'import_to_global']
     change_list_template = 'admin/main/marketdatafile/change_list.html'
+
+    def errors_link(self, obj):
+        try:
+            cnt = obj.import_errors.count()
+        except Exception:
+            cnt = 0
+        if cnt:
+            url = reverse('admin:main_marketimporterror_changelist')
+            return format_html('<a href="{}?data_file__id__exact={}">{}</a>', url, obj.id, cnt)
+        return '-'
+    errors_link.short_description = 'Errors'
 
     def import_to_global(self, request, queryset):
         from .services.global_importer import import_market_datafile
@@ -838,15 +975,28 @@ class MarketDataFileAdmin(admin.ModelAdmin):
 
     def wipe_all_global(self, request, queryset):
         from django.db import transaction
-        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog
+        from .models import MarketBar, MarketIndicatorValue, MarketIndicatorDef, MarketDataFile, SignalEvent, SignalExecutionLog, MarketImportError, DataIngestionStatus
         with transaction.atomic():
             v = MarketIndicatorValue.objects.count(); MarketIndicatorValue.objects.all().delete()
             b = MarketBar.objects.count(); MarketBar.objects.all().delete()
             d = MarketIndicatorDef.objects.count(); MarketIndicatorDef.objects.all().delete()
             e = SignalExecutionLog.objects.count(); SignalExecutionLog.objects.all().delete()
             s = SignalEvent.objects.count(); SignalEvent.objects.all().delete()
+            # Clear all import error logs to avoid chasing stale errors
+            ie = MarketImportError.objects.count(); MarketImportError.objects.all().delete()
             MarketDataFile.objects.all().update(status='pending', processed_at=None)
-        self.message_user(request, f"Global wipe complete → Bars={b}, IndicatorValues={v}, IndicatorDefs={d}, Signals={s}, ExecLogs={e}. Files set to pending.")
+            # Reset ingestion status counters (preserve active flag and interval)
+            try:
+                st = DataIngestionStatus.get()
+                st.last_run = None
+                st.files_scanned = 0
+                st.files_imported = 0
+                st.rows_imported = 0
+                st.last_error = ''
+                st.save(update_fields=['last_run', 'files_scanned', 'files_imported', 'rows_imported', 'last_error', 'updated_at'])
+            except Exception:
+                pass
+        self.message_user(request, f"Global wipe complete → Bars={b}, IndicatorValues={v}, IndicatorDefs={d}, Signals={s}, ExecLogs={e}, ImportErrors={ie}. Files set to pending and counters reset.")
     wipe_all_global.short_description = 'Wipe ALL global market data (set files to pending)'
 
 

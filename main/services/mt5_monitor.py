@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 from django.utils import timezone
 from django.conf import settings
 from django.db import models
+from django.db import close_old_connections, OperationalError, transaction
 
 from ..models import (
     MT5ConnectionSettings, 
@@ -68,6 +69,7 @@ class MT5ConnectionMonitor:
         
         while self.monitoring_active:
             try:
+                close_old_connections()
                 # Refresh settings each loop
                 monitoring_settings = MT5MonitoringSettings.get_settings()
                 
@@ -140,8 +142,47 @@ class MT5ConnectionMonitor:
                 if monitoring_settings.auto_reconnect_enabled:
                     self._attempt_reconnection(connection, monitoring_settings)
             
-            # Save health record
-            health_record.save()
+            # Decide whether to persist a health record to reduce volume
+            should_save = True
+            try:
+                if monitoring_settings.store_changes_only:
+                    last = MT5ConnectionHealth.objects.filter(settings=connection).only('is_connected', 'ping_ms', 'check_time').order_by('-check_time').first()
+                    if last is not None:
+                        now = timezone.now()
+                        delta_sec = (now - last.check_time).total_seconds()
+                        # State change always persists
+                        state_changed = bool(last.is_connected != is_connected)
+                        # Consider ping change significant if threshold exceeded and both pings present
+                        ping_changed = False
+                        try:
+                            if last.ping_ms is not None and ping_ms is not None:
+                                ping_changed = abs(int(last.ping_ms) - int(ping_ms)) >= int(monitoring_settings.ping_delta_threshold_ms or 0)
+                        except Exception:
+                            ping_changed = False
+                        # Snapshot policies
+                        if is_connected:
+                            need_snapshot = delta_sec >= int(monitoring_settings.snapshot_interval_connected_sec or 600)
+                        else:
+                            # When disconnected, keep a sparse record every min_record_interval_sec
+                            need_snapshot = delta_sec >= int(monitoring_settings.min_record_interval_sec or 60)
+                        should_save = state_changed or ping_changed or need_snapshot or (delta_sec >= 10 * int(monitoring_settings.health_check_interval or 30))
+            except Exception:
+                should_save = True
+
+            if should_save:
+                for attempt in range(3):
+                    try:
+                        close_old_connections()
+                        with transaction.atomic():
+                            health_record.save()
+                        break
+                    except OperationalError as oe:
+                        if 'locked' in str(oe).lower() and attempt < 2:
+                            time.sleep(0.1 * (attempt + 1))
+                            continue
+                        raise
+            else:
+                logger.debug(f"Health record suppressed for {connection.name} (stable)")
             
         except Exception as e:
             # Save failed health record
@@ -151,7 +192,31 @@ class MT5ConnectionMonitor:
                 ping_ms=None,
                 error_message=str(e)
             )
-            health_record.save()
+            try:
+                last = MT5ConnectionHealth.objects.filter(settings=connection).only('is_connected', 'check_time').order_by('-check_time').first()
+                should_save_err = True
+                if last is not None and last.is_connected is False:
+                    # Collapse repeated error logs within min_record_interval_sec
+                    delta_sec = (timezone.now() - last.check_time).total_seconds()
+                    should_save_err = delta_sec >= int(MT5MonitoringSettings.get_settings().min_record_interval_sec or 60)
+                if should_save_err:
+                    for attempt in range(3):
+                        try:
+                            close_old_connections()
+                            with transaction.atomic():
+                                health_record.save()
+                            break
+                        except OperationalError as oe:
+                            if 'locked' in str(oe).lower() and attempt < 2:
+                                time.sleep(0.1 * (attempt + 1))
+                                continue
+                            raise
+            except Exception:
+                try:
+                    close_old_connections()
+                    health_record.save()
+                except Exception:
+                    pass
             
             logger.error(f"Health check error for {connection.name}: {str(e)}")
     

@@ -16,6 +16,7 @@ from typing import Optional
 from datetime import datetime, timezone as dt_timezone
 
 from django.utils import timezone
+from django.db import close_old_connections, OperationalError, transaction
 
 from ..models import TradingSystem, MarketDataFile, DataIngestionStatus, SignalEvent
 from .global_feed_collector import collect_for_system as collect_global
@@ -48,6 +49,8 @@ class GlobalIngestionWorker:
     def _loop(self):
         while self._active:
             try:
+                # Ensure per-thread DB connection is fresh
+                close_old_connections()
                 self._tick()
             except Exception:
                 pass
@@ -59,6 +62,7 @@ class GlobalIngestionWorker:
             time.sleep(interval)
 
     def _tick(self):
+        close_old_connections()
         status = DataIngestionStatus.get()
         status.active = True
         now = timezone.now()
@@ -83,7 +87,18 @@ class GlobalIngestionWorker:
                 scanned += 1
                 mtime_changed = (not mdf.file_modified) or abs(st.st_mtime - (mdf.file_modified.timestamp() if hasattr(mdf.file_modified,'timestamp') else time.mktime(mdf.file_modified.timetuple()))) > 0.5
                 if (mdf.status != 'completed') or mtime_changed:
-                    res = import_market_datafile(mdf)
+                    # Import with retries to avoid transient SQLite locks
+                    res = None
+                    for attempt in range(5):
+                        try:
+                            close_old_connections()
+                            res = import_market_datafile(mdf)
+                            break
+                        except OperationalError as oe:
+                            if 'locked' in str(oe).lower() and attempt < 4:
+                                time.sleep(0.2 * (attempt + 1))
+                                continue
+                            raise
                     imported += 1
                     rows += (res.bars_created or 0)
                     # Generate and persist signals for systems bound to this feed
@@ -102,16 +117,26 @@ class GlobalIngestionWorker:
                                     if getattr(ev, 'event_time', None) and ev.event_time < cutoff:
                                         continue
                                     # Idempotent insert
-                                    SignalEvent.objects.get_or_create(
-                                        trading_system=ev.trading_system,
-                                        timeframe=ev.timeframe,
-                                        level=getattr(ev, 'level', 1),
-                                        feed=getattr(ev, 'feed', None),
-                                        direction=ev.direction,
-                                        action=getattr(ev, 'action', 'OPEN'),
-                                        event_time=ev.event_time,
-                                        defaults={'rule_text': ev.rule_text, 'ind_values': getattr(ev, 'ind_values', None)},
-                                    )
+                                    for attempt in range(3):
+                                        try:
+                                            close_old_connections()
+                                            with transaction.atomic():
+                                                SignalEvent.objects.get_or_create(
+                                                    trading_system=ev.trading_system,
+                                                    timeframe=ev.timeframe,
+                                                    level=getattr(ev, 'level', 1),
+                                                    feed=getattr(ev, 'feed', None),
+                                                    direction=ev.direction,
+                                                    action=getattr(ev, 'action', 'OPEN'),
+                                                    event_time=ev.event_time,
+                                                    defaults={'rule_text': ev.rule_text, 'ind_values': getattr(ev, 'ind_values', None)},
+                                                )
+                                            break
+                                        except OperationalError as oe:
+                                            if 'locked' in str(oe).lower() and attempt < 2:
+                                                time.sleep(0.1 * (attempt + 1))
+                                                continue
+                                            raise
                             except Exception:
                                 continue
                     except Exception:
@@ -120,12 +145,23 @@ class GlobalIngestionWorker:
                 status.last_error = str(e)
                 continue
 
+        # Save status with retry (avoids transient locking)
         status.files_scanned += scanned
         status.files_imported += imported
         status.rows_imported += rows
         status.last_run = now
         status.last_error = ''
-        status.save()
+        for attempt in range(3):
+            try:
+                close_old_connections()
+                with transaction.atomic():
+                    status.save()
+                break
+            except OperationalError as oe:
+                if 'locked' in str(oe).lower() and attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise
 
 
 _worker: Optional[GlobalIngestionWorker] = None

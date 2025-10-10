@@ -682,6 +682,11 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
         except NameError:
             active_cycle = {'BUY': None, 'SELL': None}
 
+        # Snapshot position counters at the start of this bar to make rule evaluation
+        # consistent within the bar (avoid same-bar OPEN -> CLOSE artifacts).
+        pos_count_start = dict(pos_count)
+        bar_opened: Dict[str, bool] = {'BUY': False, 'SELL': False}
+
         def env_get(name: str, level: Optional[int], lag: int) -> Optional[int]:
             return _env_get_global(name, level, lag, base_hist, base_level, series)
 
@@ -693,7 +698,8 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
         setattr(env_get, 'changed', _changed)
 
         def _pos_count(side: str) -> int:
-            return int(pos_count.get(side, 0))
+            # Expose snapshot count for this bar, not the mutated one
+            return int(pos_count_start.get(side, 0))
         setattr(env_get, 'pos_count', _pos_count)
 
         for r in rules:
@@ -710,8 +716,9 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                     else:
                         direction = 'SELL'
                         act_kind = 'CLOSE'
-                    # Suppress CLOSE when no open positions on that side
-                    if act_kind == 'CLOSE' and pos_count.get(direction, 0) <= 0:
+                    # Suppress CLOSE when there was no position at the start of bar,
+                    # even if an OPEN was generated earlier on this same bar.
+                    if act_kind == 'CLOSE' and pos_count_start.get(direction, 0) <= 0:
                         continue
                     # Snapshot indicator values used for this decision
                     snapshot: Dict[str, Optional[int]] = {}
@@ -750,11 +757,13 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                     # Update local position counters to reflect generated stream
                     if act_kind == 'OPEN':
                         pos_count[direction] = pos_count.get(direction, 0) + 1
+                        bar_opened[direction] = True
                     else:
-                        pos_count[direction] = max(0, pos_count.get(direction, 0) - 1)
-                        # Close cycle when side count goes to zero
-                        if pos_count.get(direction, 0) == 0:
-                            active_cycle[direction] = None
+                        # CLOSE semantics: close ALL open positions for this side on the current bar
+                        # to avoid emitting multiple CLOSE signals on subsequent bars.
+                        pos_count[direction] = 0
+                        # Close cycle immediately
+                        active_cycle[direction] = None
     return events
 
 

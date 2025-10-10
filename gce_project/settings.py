@@ -12,9 +12,19 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+from urllib.parse import urlparse, parse_qs
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment from .env file if present (local dev convenience)
+# Allow disabling .env autoload for utility subprocesses
+if load_dotenv is not None and not os.environ.get('DJANGO_SKIP_DOTENV'):
+    load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -75,14 +85,82 @@ WSGI_APPLICATION = 'gce_project.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
+def _database_from_env():
+    """Build DATABASES['default'] from environment variables.
+
+    Priority:
+      1) DATABASE_URL if provided and starts with postgres/postgresql
+      2) DB_ENGINE=postgres + discrete vars (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT)
+      3) Fallback to local SQLite (development default)
+    """
+
+    db_url = os.environ.get('DATABASE_URL', '').strip()
+    db_engine_env = os.environ.get('DB_ENGINE', '').strip().lower()
+
+    # PostgreSQL via URL
+    if db_url and db_url.lower().startswith(('postgres://', 'postgresql://')):
+        u = urlparse(db_url)
+        name = (u.path or '').lstrip('/') or os.environ.get('DB_NAME', '')
+        default_port = '5432'
+        query = parse_qs(u.query)
+        options = {}
+        # Optional sslmode from query string
+        sslm = query.get('sslmode', [None])[0]
+        if sslm:
+            options['sslmode'] = sslm
+        connect_timeout = os.environ.get('DB_CONNECT_TIMEOUT')
+        if connect_timeout:
+            try:
+                options['connect_timeout'] = int(connect_timeout)
+            except Exception:
+                pass
+
+        return {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': name,
+            'USER': u.username or os.environ.get('DB_USER', ''),
+            'PASSWORD': u.password or os.environ.get('DB_PASSWORD', ''),
+            'HOST': u.hostname or os.environ.get('DB_HOST', 'localhost'),
+            'PORT': str(u.port or os.environ.get('DB_PORT', default_port)),
+            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+            'OPTIONS': options,
+        }
+
+    # PostgreSQL via discrete env vars
+    if db_engine_env in ('postgres', 'postgresql', 'pg', 'psql'):
+        options = {}
+        sslmode = os.environ.get('DB_SSLMODE')
+        if sslmode:
+            options['sslmode'] = sslmode
+        connect_timeout = os.environ.get('DB_CONNECT_TIMEOUT')
+        if connect_timeout:
+            try:
+                options['connect_timeout'] = int(connect_timeout)
+            except Exception:
+                pass
+        return {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('DB_NAME', 'gce3'),
+            'USER': os.environ.get('DB_USER', 'postgres'),
+            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ.get('DB_HOST', 'localhost'),
+            'PORT': os.environ.get('DB_PORT', '5432'),
+            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+            'OPTIONS': options,
+        }
+
+    # Default: SQLite (dev)
+    return {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
         'OPTIONS': {
             'timeout': 30,
         },
     }
+
+
+DATABASES = {
+    'default': _database_from_env()
 }
 
 

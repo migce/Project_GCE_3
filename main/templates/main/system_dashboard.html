@@ -370,10 +370,14 @@
                     <small style="color: #6c757d;">Хранилище данных</small>
                 </td>
                 <td>
-                    <span class="status connected">✅ Подключена</span>
+                    {% if db_connected %}
+                        <span class="status connected">✅ Подключена</span>
+                    {% else %}
+                        <span class="status disconnected">❌ Ошибка</span>
+                    {% endif %}
                 </td>
                 <td>
-                    SQLite<br>
+                    {{ db_engine|default:"SQLite" }}{% if db_version %} <small style="color:#6c757d;">({{ db_version }})</small>{% endif %}<br>
                     <small style="color: #6c757d;">{{ db_size|default:"Размер неизвестен" }}</small>
                 </td>
                 <td>

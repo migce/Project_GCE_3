@@ -313,6 +313,28 @@ class MT5MonitoringSettings(models.Model):
         verbose_name="Health Records Retention (days)",
         help_text="How long to keep health check records"
     )
+
+    # Logging volume control
+    store_changes_only = models.BooleanField(
+        default=True,
+        verbose_name='Store Changes Only',
+        help_text='Reduce health log volume by saving only on state/ping changes and periodic snapshots'
+    )
+    min_record_interval_sec = models.PositiveIntegerField(
+        default=60,
+        verbose_name='Min Record Interval (sec)',
+        help_text='Minimum spacing between consecutive health records per connection when disconnected'
+    )
+    snapshot_interval_connected_sec = models.PositiveIntegerField(
+        default=600,
+        verbose_name='Snapshot Interval When Connected (sec)',
+        help_text='When connected and stable, store at most one record per this interval'
+    )
+    ping_delta_threshold_ms = models.PositiveIntegerField(
+        default=100,
+        verbose_name='Ping Change Threshold (ms)',
+        help_text='Store a record if ping change exceeds this threshold'
+    )
     
     # Monitoring control
     monitoring_enabled = models.BooleanField(
@@ -356,6 +378,10 @@ class MT5MonitoringSettings(models.Model):
                 'max_reconnect_attempts': 5,
                 'monitoring_enabled': True,
                 'auto_reconnect_enabled': True,
+                'store_changes_only': True,
+                'min_record_interval_sec': 60,
+                'snapshot_interval_connected_sec': 600,
+                'ping_delta_threshold_ms': 100,
             }
         )
         return settings
@@ -412,6 +438,14 @@ class TradingSystem(models.Model):
         default=0.01,
         verbose_name='Lot Size',
         help_text='Default lot size to use for trades (e.g., 0.01)'
+    )
+    # Spread (in pips) to account in simulations and KPIs
+    spread_pips = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        verbose_name='Spread (pips)',
+        help_text='Per-trade spread to subtract from PnL (in pips)'
     )
 
     # MT5 magic number mapping for this system (optional)
@@ -769,7 +803,8 @@ class MarketIndicatorDef(models.Model):
     """Indicator definition scoped to a DataFeed."""
 
     feed = models.ForeignKey(DataFeed, on_delete=models.CASCADE, related_name='indicators')
-    name = models.CharField(max_length=64)
+    # Some indicator names come from CSV headers and can exceed 64 chars
+    name = models.CharField(max_length=255)
     dtype = models.CharField(max_length=16, default='numeric')
     description = models.TextField(blank=True)
 
@@ -820,3 +855,28 @@ class MarketDataFile(models.Model):
 
     def __str__(self):
         return f"{self.provider}:{self.filename} ({self.status})"
+
+
+class MarketImportError(models.Model):
+    """Per-row import error log for global importer.
+
+    Keeps lightweight records to diagnose why a CSV failed to import.
+    """
+
+    data_file = models.ForeignKey(MarketDataFile, on_delete=models.CASCADE, related_name='import_errors')
+    created_at = models.DateTimeField(auto_now_add=True)
+    row_number = models.PositiveIntegerField(null=True, blank=True)
+    column = models.CharField(max_length=64, blank=True)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['data_file', '-created_at']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        rn = self.row_number or 0
+        col = self.column or '-'
+        return f"{self.data_file.filename}#{rn} [{col}] {self.message[:60]}"

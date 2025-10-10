@@ -1,6 +1,7 @@
 {% extends 'main/base.html' %}
 
 {% block title %}TradeStaton Simulation - Project GCE 3{% endblock %}
+{% load numfmt %}
 
 {% block content %}
 {% include 'main/_th_tabs.html' %}
@@ -23,105 +24,620 @@
         <label class="form-pro-label">Base TF Level</label>
         <input type="number" name="tf" value="{{ base_level }}" min="1" step="1" class="form-pro-control" />
       </div>
+      <div>
+        <label class="form-pro-label">Spread (pips)</label>
+        <input type="text" value="{{ selected_system.spread_pips|default_if_none:0|nsp:1 }}" class="form-pro-control" readonly />
+      </div>
+      <div>
+        <label class="form-pro-label">Lot Size</label>
+        <input type="number" name="lot" value="{{ form_lot|floatformat:2 }}" step="0.01" class="form-pro-control" />
+      </div>
+      <div>
+        <label class="form-pro-label">Tick Size / $ per Tick</label>
+        <input type="text" value="{% if mt5_tick_size %}{{ mt5_tick_size }} / {{ mt5_usd_per_tick_lot|floatformat:2 }}{% else %}-{% endif %}" class="form-pro-control" readonly title="{% if mt5_tick_reason %}{{ mt5_tick_reason }}{% endif %}" />
+      </div>
+      <div>
+        <label class="form-pro-label">Start Balance ($)</label>
+        <input type="number" name="balance" value="{{ form_balance|floatformat:2 }}" step="0.01" class="form-pro-control" />
+      </div>
       <div class="form-pro-action"><button class="btn btn-pro" style="width:100%;">Apply</button></div>
     </div>
   </form>
 
-  <div class="kpi-grid">
-    <div class="kpi"><div class="kpi-label">Total Trades</div><div class="kpi-value">{{ total_trades|default:"0" }}</div></div>
-    <div class="kpi"><div class="kpi-label">Total PnL (pips)</div><div class="kpi-value">{{ total_pips|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value">{{ win_rate|floatformat:1 }}%</div></div>
-    <div class="kpi"><div class="kpi-label">Base TF</div><div class="kpi-value">{% if selected_tf %}{{ selected_tf.timeframe }}{% else %}-{% endif %}</div></div>
-    <div class="kpi"><div class="kpi-label">Open PnL (pips)</div><div class="kpi-value">{{ kpi_open_pnl|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Cycles (done)</div><div class="kpi-value">{{ kpi_cycles.all }} (B {{ kpi_cycles.buy }}, S {{ kpi_cycles.sell }})</div></div>
-    <div class="kpi"><div class="kpi-label">Profit Factor</div><div class="kpi-value">{% if kpi_profit_factor %}{{ kpi_profit_factor|floatformat:2 }}{% else %}-{% endif %}</div></div>
-    <div class="kpi"><div class="kpi-label">Payoff Ratio</div><div class="kpi-value">{% if kpi_payoff %}{{ kpi_payoff|floatformat:2 }}{% else %}-{% endif %}</div></div>
-    <div class="kpi"><div class="kpi-label">Expectancy (pips)</div><div class="kpi-value">{{ kpi_expectancy|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Max Drawdown (pips)</div><div class="kpi-value">{{ kpi_max_dd|floatformat:1 }}</div></div>
-    <div class="kpi"><div class="kpi-label">Avg Duration</div><div class="kpi-value">{{ kpi_avg_duration }}</div></div>
-    <div class="kpi"><div class="kpi-label">Streaks (W/L)</div><div class="kpi-value">{{ kpi_streaks.win }}/{{ kpi_streaks.loss }}</div></div>
-    <div class="kpi"><div class="kpi-label">Direction Mix</div><div class="kpi-value">BUY {{ kpi_dir_mix.buy_pct|floatformat:0 }}% / SELL {{ kpi_dir_mix.sell_pct|floatformat:0 }}%</div></div>
-    <div class="kpi">
-      <div class="kpi-label">Cum PnL (All)</div>
-      <svg width="{{ spark_overall.w }}" height="{{ spark_overall.h }}" class="spark">
-        <line x1="0" y1="{{ spark_overall.zero_y }}" x2="{{ spark_overall.w }}" y2="{{ spark_overall.zero_y }}" class="spark-zero"/>
-        <path d="{{ spark_overall.path }}" class="spark-line all"/>
-        {% if spark_overall.overlay %}<path d="{{ spark_overall.overlay }}" class="spark-overlay all"/>{% endif %}
-      </svg>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Cum PnL (Buy)</div>
-      <svg width="{{ spark_buy.w }}" height="{{ spark_buy.h }}" class="spark">
-        <line x1="0" y1="{{ spark_buy.zero_y }}" x2="{{ spark_buy.w }}" y2="{{ spark_buy.zero_y }}" class="spark-zero"/>
-        <path d="{{ spark_buy.path }}" class="spark-line buy"/>
-        {% if spark_buy.overlay %}<path d="{{ spark_buy.overlay }}" class="spark-overlay buy"/>{% endif %}
-      </svg>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Cum PnL (Sell)</div>
-      <svg width="{{ spark_sell.w }}" height="{{ spark_sell.h }}" class="spark">
-        <line x1="0" y1="{{ spark_sell.zero_y }}" x2="{{ spark_sell.w }}" y2="{{ spark_sell.zero_y }}" class="spark-zero"/>
-        <path d="{{ spark_sell.path }}" class="spark-line sell"/>
-        {% if spark_sell.overlay %}<path d="{{ spark_sell.overlay }}" class="spark-overlay sell"/>{% endif %}
-      </svg>
-    </div>
+  <div class="kpi-table-wrap">
+    <table class="kpi-table">
+      <tr class="kpi-section"><th colspan="4">Overview</th></tr>
+      <tr>
+        <td>
+          <span class="kpi-k">Base TF</span>
+          <span class="kpi-v">{% if selected_tf %}{{ selected_tf.timeframe }}{% else %}-{% endif %}</span>
+          <span class="kpi-sub">Spread (pips): {{ selected_system.spread_pips|default_if_none:0|nsp:1 }}</span>
+        </td>
+        <td><span class="kpi-k">Total Trades</span><span class="kpi-v">{{ total_trades|nsp:0 }}</span></td>
+        <td><span class="kpi-k">Win Rate</span><span class="kpi-v">{{ win_rate|floatformat:1 }}%</span></td>
+        <td><span class="kpi-k">Cycles</span><span class="kpi-v">{{ kpi_cycles.all }} (B {{ kpi_cycles.buy }}, S {{ kpi_cycles.sell }})</span></td>
+      </tr>
+
+      <tr class="kpi-section"><th colspan="4">PnL Snapshot</th></tr>
+      <tr>
+        <td>
+          <span class="kpi-k">Total PnL (pips)</span>
+          <span class="kpi-v">{{ total_pips|nsp:1 }}</span>
+          <span class="kpi-sub {% if kpi_pnl_vs_bh > 0 %}kpi-pos{% elif kpi_pnl_vs_bh < 0 %}kpi-neg{% endif %}">vs Buy & Hold: {{ kpi_pnl_vs_bh|nsp:1 }}{% if kpi_pnl_vs_bh_pct is not None %} ({{ kpi_pnl_vs_bh_pct|floatformat:1 }}%){% endif %}</span>
+        </td>
+        <td><span class="kpi-k">Open PnL (pips)</span><span class="kpi-v">{{ kpi_open_pnl|nsp:1 }}</span></td>
+        <td><span class="kpi-k">Buy & Hold (pips)</span><span class="kpi-v">{{ kpi_buy_hold|nsp:1 }}</span></td>
+        <td><span class="kpi-k">Short & Hold (pips)</span><span class="kpi-v">{{ kpi_short_hold|nsp:1 }}</span></td>
+      </tr>
+      <tr>
+        <td>
+          <span class="kpi-k">Total PnL (Buy)</span>
+          <span class="kpi-v {% if kpi_cum_buy_total > 0 %}kpi-pos{% elif kpi_cum_buy_total < 0 %}kpi-neg{% endif %}">{{ kpi_cum_buy_total|nsp:1 }}</span>
+        </td>
+        <td>
+          <span class="kpi-k">Total PnL (Sell)</span>
+          <span class="kpi-v {% if kpi_cum_sell_total > 0 %}kpi-pos{% elif kpi_cum_sell_total < 0 %}kpi-neg{% endif %}">{{ kpi_cum_sell_total|nsp:1 }}</span>
+        </td>
+        <td>
+          <span class="kpi-k">Total PnL ($)</span>
+          <span class="kpi-v {% if kpi_profit_usd > 0 %}kpi-pos{% elif kpi_profit_usd < 0 %}kpi-neg{% endif %}">{{ kpi_profit_usd|nsp:2 }}</span>
+          <span class="kpi-sub">Return: {% if kpi_return_pct is not None %}{{ kpi_return_pct|floatformat:2 }}%{% else %}-{% endif %}</span>
+        </td>
+        <td>
+          <span class="kpi-k">End Balance ($)</span>
+          <span class="kpi-v {% if kpi_end_balance >= form_balance %}kpi-pos{% else %}kpi-neg{% endif %}">{{ kpi_end_balance|nsp:2 }}</span>
+          <span class="kpi-sub">Min Equity: {{ kpi_min_equity|nsp:2 }}</span>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="4">
+          <span class="kpi-k">Capital needed to survive worst dip</span>
+          <span class="kpi-v {% if kpi_capital_needed > 0 %}kpi-neg{% else %}kpi-pos{% endif %}">{{ kpi_capital_needed|nsp:2 }}</span>
+          <span class="kpi-sub">{% if kpi_capital_needed_pct is not None %}{{ kpi_capital_needed_pct|floatformat:2 }}% of start{% endif %}</span>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="4" class="kpi-spark">
+          <span class="kpi-k">Equity ($)</span>
+          <svg width="{{ spark_equity.w }}" height="{{ spark_equity.h }}" class="spark">
+            <line x1="0" y1="{{ spark_equity.zero_y }}" x2="{{ spark_equity.w }}" y2="{{ spark_equity.zero_y }}" class="spark-zero"/>
+            <path d="{{ spark_equity.path }}" class="spark-line equity"/>
+          </svg>
+        </td>
+      </tr>
+
+      <tr class="kpi-section"><th colspan="4">Relative vs Hold</th></tr>
+      <tr>
+        <td>
+          <span class="kpi-k">Buy (cum) vs B&H</span>
+          <span class="kpi-v {% if kpi_buy_vs_bh > 0 %}kpi-pos{% elif kpi_buy_vs_bh < 0 %}kpi-neg{% endif %}">{{ kpi_buy_vs_bh|nsp:1 }}</span>
+          <span class="kpi-sub">Cum Buy: {{ kpi_cum_buy_total|nsp:1 }}{% if kpi_buy_vs_bh_pct is not None %} ({{ kpi_buy_vs_bh_pct|floatformat:1 }}%){% endif %}</span>
+        </td>
+        <td>
+          <span class="kpi-k">Sell (cum) vs S&H</span>
+          <span class="kpi-v {% if kpi_sell_vs_sh > 0 %}kpi-pos{% elif kpi_sell_vs_sh < 0 %}kpi-neg{% endif %}">{{ kpi_sell_vs_sh|nsp:1 }}</span>
+          <span class="kpi-sub">Cum Sell: {{ kpi_cum_sell_total|nsp:1 }}{% if kpi_sell_vs_sh_pct is not None %} ({{ kpi_sell_vs_sh_pct|floatformat:1 }}%){% endif %}</span>
+        </td>
+        <td></td>
+        <td></td>
+      </tr>
+
+      <tr class="kpi-section"><th colspan="4">Cycle Performance</th></tr>
+      <tr>
+        <td><span class="kpi-k">Cycle Profit (avg/max)</span><span class="kpi-v">{{ kpi_cycle_profit_avg|nsp:1 }} / {{ kpi_cycle_profit_max|nsp:1 }}</span></td>
+        <td><span class="kpi-k">Cycle Loss (avg/max)</span><span class="kpi-v">{{ kpi_cycle_loss_avg|nsp:1 }} / {{ kpi_cycle_loss_max|nsp:1 }}</span></td>
+        <td><span class="kpi-k">Profit Factor</span><span class="kpi-v">{% if kpi_profit_factor %}{{ kpi_profit_factor|floatformat:2 }}{% else %}-{% endif %}</span></td>
+        <td><span class="kpi-k">Payoff Ratio</span><span class="kpi-v">{% if kpi_payoff %}{{ kpi_payoff|floatformat:2 }}{% else %}-{% endif %}</span></td>
+      </tr>
+      <tr>
+        <td><span class="kpi-k">Trades per Cycle (avg/max)</span><span class="kpi-v">{{ kpi_trades_per_cycle_avg|floatformat:1 }} / {{ kpi_trades_per_cycle_max|nsp:0 }}</span></td>
+        <td></td>
+        <td></td>
+        <td></td>
+      </tr>
+      <tr>
+        <td colspan="4" class="kpi-spark">
+          <div class="kpi-inline-dist">
+            <div>
+              <span class="kpi-k">Cycles distribution (#trades → cycles)</span>
+              <span class="kpi-v">
+                {% if kpi_cycle_dist %}
+                  {% for cnt, qty in kpi_cycle_dist %}{% if not forloop.first %} • {% endif %}{{ cnt }}→{{ qty|nsp:0 }}{% endfor %}
+                {% else %}-{% endif %}
+              </span>
+            </div>
+            {% if kpi_cycle_dist %}
+              <div class="spark-bars">
+                {% for cnt, qty in kpi_cycle_dist %}
+                  <div class="bwrap" title="{{ cnt }} trades: {{ qty|nsp:0 }} cycles">
+                    <div class="bar" style="height:{% widthratio qty kpi_cycle_dist_max 30 %}px"></div>
+                    <div class="lbl">{{ cnt }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      <tr>
+        <td colspan="4" class="kpi-spark">
+          <div class="kpi-inline-dist">
+            <div>
+              <span class="kpi-k">Profit by trades per cycle (sum pips)</span>
+              <span class="kpi-v">
+                {% if kpi_profit_by_count %}
+                  {% for it in kpi_profit_by_count %}{% if not forloop.first %} • {% endif %}
+                    <span class="{% if it.pos %}kpi-pos{% elif it.neg %}kpi-neg{% endif %}">{{ it.count }}→{{ it.sum|nsp:1 }}</span>
+                  {% endfor %}
+                {% else %}-{% endif %}
+              </span>
+            </div>
+            {% if kpi_profit_by_count %}
+              <div class="spark-bars">
+                {% for it in kpi_profit_by_count %}
+                  <div class="bwrap" title="{{ it.count }} trades: {{ it.sum|nsp:1 }} pips">
+                    <div class="bar {% if it.pos %}pos{% elif it.neg %}neg{% endif %}" style="height:{% widthratio it.abs kpi_profit_by_count_max_abs 30 %}px"></div>
+                    <div class="lbl">{{ it.count }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+
+      <tr class="kpi-section"><th colspan="4">Risk & Duration</th></tr>
+      <tr>
+        <td><span class="kpi-k">Expectancy (pips)</span><span class="kpi-v">{{ kpi_expectancy|nsp:1 }}</span></td>
+        <td><span class="kpi-k">Max Drawdown (pips)</span><span class="kpi-v">{{ kpi_max_dd|nsp:1 }}</span></td>
+        <td><span class="kpi-k">Avg Duration</span><span class="kpi-v">{{ kpi_avg_duration }}</span></td>
+        <td><span class="kpi-k">Streaks (W/L)</span><span class="kpi-v">{{ kpi_streaks.win }}/{{ kpi_streaks.loss }}</span></td>
+      </tr>
+
+      <tr class="kpi-section"><th colspan="4">Mix & Trends</th></tr>
+      <tr>
+        <td><span class="kpi-k">Direction Mix</span><span class="kpi-v">BUY {{ kpi_dir_mix.buy_pct|floatformat:0 }}% / SELL {{ kpi_dir_mix.sell_pct|floatformat:0 }}%</span></td>
+        <td class="kpi-spark">
+          <span class="kpi-k">Cum PnL (All)</span>
+          <svg width="{{ spark_overall.w }}" height="{{ spark_overall.h }}" class="spark">
+            <line x1="0" y1="{{ spark_overall.zero_y }}" x2="{{ spark_overall.w }}" y2="{{ spark_overall.zero_y }}" class="spark-zero"/>
+            <path d="{{ spark_overall.path }}" class="spark-line all"/>
+            {% if spark_overall.overlay %}<path d="{{ spark_overall.overlay }}" class="spark-overlay all"/>{% endif %}
+          </svg>
+        </td>
+        <td class="kpi-spark">
+          <span class="kpi-k">Cum PnL (Buy)</span>
+          <svg width="{{ spark_buy.w }}" height="{{ spark_buy.h }}" class="spark">
+            <line x1="0" y1="{{ spark_buy.zero_y }}" x2="{{ spark_buy.w }}" y2="{{ spark_buy.zero_y }}" class="spark-zero"/>
+            <path d="{{ spark_buy.path }}" class="spark-line buy"/>
+            {% if spark_buy.overlay %}<path d="{{ spark_buy.overlay }}" class="spark-overlay buy"/>{% endif %}
+          </svg>
+        </td>
+        <td class="kpi-spark">
+          <span class="kpi-k">Cum PnL (Sell)</span>
+          <svg width="{{ spark_sell.w }}" height="{{ spark_sell.h }}" class="spark">
+            <line x1="0" y1="{{ spark_sell.zero_y }}" x2="{{ spark_sell.w }}" y2="{{ spark_sell.zero_y }}" class="spark-zero"/>
+            <path d="{{ spark_sell.path }}" class="spark-line sell"/>
+            {% if spark_sell.overlay %}<path d="{{ spark_sell.overlay }}" class="spark-overlay sell"/>{% endif %}
+          </svg>
+        </td>
+      </tr>
+    </table>
   </div>
 
   {% if price_chart %}
   <div class="card card-flat price-chart-block" style="margin-top:0.5rem;">
     <div class="rules-head">Base TF Price</div>
     <div class="pc-legend" style="position:absolute; right:10px; top:6px; font-size:.8rem; color:#4b5563; background:rgba(255,255,255,.8); padding:2px 6px; border-radius:4px; display:none;"></div>
-    <svg class="price-svg" data-w="{{ price_chart.w }}" data-h="{{ price_chart.h }}" data-pad="{{ price_chart.pad }}" data-pmin="{{ price_chart.pmin }}" data-pmax="{{ price_chart.pmax }}" data-sx="{{ price_chart.sx }}" data-dts='{{ price_chart.dts|join:"," }}' viewBox="0 0 {{ price_chart.w }} {{ price_chart.h }}" preserveAspectRatio="xMidYMid meet" width="100%" height="240">
-      {% for b in price_chart.bars %}
-        <!-- vertical range -->
-        <line x1="{{ b.x }}" y1="{{ b.yh }}" x2="{{ b.x }}" y2="{{ b.yl }}" class="bar" />
-        <!-- open tick (left) -->
-        <line x1="{{ b.xl }}" y1="{{ b.yo }}" x2="{{ b.x }}" y2="{{ b.yo }}" class="bar" />
-        <!-- close tick (right) -->
-        <line x1="{{ b.x }}" y1="{{ b.yc }}" x2="{{ b.xr }}" y2="{{ b.yc }}" class="bar" />
-      {% endfor %}
-      {% for m in price_chart.markers %}
-        <circle cx="{{ m.cx }}" cy="{{ m.cy }}" r="3.2" class="mk {{ m.klass }}" />
-      {% endfor %}
+    <svg class="price-svg" data-w="{{ price_chart.w }}" data-h="{{ price_chart.h }}" data-pad="{{ price_chart.pad }}" data-pmin="{{ price_chart.pmin }}" data-pmax="{{ price_chart.pmax }}" data-sx="{{ price_chart.sx }}" data-dts='{{ price_chart.dts|join:"," }}' data-highs='{{ price_chart.highs|join:"," }}' data-lows='{{ price_chart.lows|join:"," }}' data-opens='{{ price_chart.opens|join:"," }}' data-closes='{{ price_chart.closes|join:"," }}' data-n='{{ price_chart.n }}' viewBox="0 0 {{ price_chart.w }} {{ price_chart.h }}" preserveAspectRatio="xMidYMid meet" width="100%" height="240">
+      <g class="bars"></g>
+      <g class="marks"></g>
       <g class="pc-cross" style="display:none;">
         <line class="cross-h" x1="0" y1="0" x2="{{ price_chart.w }}" y2="0" />
         <line class="cross-v" x1="0" y1="0" x2="0" y2="{{ price_chart.h }}" />
       </g>
     </svg>
+    <div class="pc-toolbar" style="display:flex; align-items:center; justify-content:flex-end; gap:6px; margin:4px 6px 0 0;">
+      <span class="pc-bars-count" style="margin-right:auto; font-size:.78rem; color:#4b5563;">Bars: 0</span>
+      <button type="button" class="btn btn-pro pc-zoom-in" style="padding:.2rem .5rem;">+</button>
+      <button type="button" class="btn btn-pro pc-zoom-out" style="padding:.2rem .5rem;">-</button>
+      <button type="button" class="btn btn-pro pc-reset" style="padding:.2rem .5rem;" title="Reset view">Reset</button>
+    </div>
+    <input type="range" class="pc-scroll" min="0" value="0" step="1" style="width:100%; margin-top:6px;" />
+    <script type="application/json" class="pc-markers-json">{{ price_chart.markers_json|safe }}</script>
     <script>
       (function(){
-        var wrap = document.currentScript.previousElementSibling.previousElementSibling; // svg is previous, legend before it
-        var svg = wrap.nextElementSibling; // actually our svg element is next after legend div
-        if(!svg || !svg.classList.contains('price-svg')) return;
-        var legend = wrap;
-        // Adjust DOM references
-        legend = svg.previousElementSibling;
-        var w = parseFloat(svg.dataset.w || svg.getAttribute('viewBox').split(' ')[2]);
-        var h = parseFloat(svg.dataset.h || svg.getAttribute('viewBox').split(' ')[3]);
+        var container = document.currentScript.closest('.price-chart-block');
+        if(!container) return;
+        var legend = container.querySelector('.pc-legend');
+        var svg = container.querySelector('.price-svg');
+        var toolbar = container.querySelector('.pc-toolbar');
+        var scroll = container.querySelector('.pc-scroll');
+        if(!svg || !toolbar || !scroll) return;
+        var viewBox = svg.getAttribute('viewBox') || '0 0 0 0';
+        var vbParts = viewBox.split(' ');
+        var w = parseFloat(svg.dataset.w || vbParts[2] || 0);
+        var h = parseFloat(svg.dataset.h || vbParts[3] || 0);
         var pad = parseFloat(svg.dataset.pad || 6);
-        var pmin = parseFloat(svg.dataset.pmin);
-        var pmax = parseFloat(svg.dataset.pmax);
-        var sx = parseFloat(svg.dataset.sx);
+        var rawPmin = parseFloat(svg.dataset.pmin);
+        var rawPmax = parseFloat(svg.dataset.pmax);
         var dts = (svg.dataset.dts || '').split(',');
+        function parseNumberList(str){
+          if(!str) return [];
+          var parts = str.split(',');
+          var res = new Array(parts.length);
+          for(var i=0; i<parts.length; i++){
+            var v = parseFloat(parts[i]);
+            res[i] = isFinite(v) ? v : NaN;
+          }
+          return res;
+        }
+        var highs = parseNumberList(svg.dataset.highs);
+        var lows = parseNumberList(svg.dataset.lows);
+        var opens = parseNumberList(svg.dataset.opens);
+        var closes = parseNumberList(svg.dataset.closes);
+        var n = parseInt(svg.dataset.n || '0', 10);
+        if(!n){
+          n = Math.max(highs.length, lows.length, opens.length, closes.length, 0);
+        }
+        if(!n){
+          toolbar.style.display = 'none';
+          scroll.style.display = 'none';
+          if(legend) legend.style.display = 'none';
+          return;
+        }
+        function finiteMin(arr){
+          var min = Infinity;
+          for(var i=0; i<arr.length; i++){
+            var v = arr[i];
+            if(!isFinite(v)) continue;
+            if(v < min) min = v;
+          }
+          return min === Infinity ? NaN : min;
+        }
+        function finiteMax(arr){
+          var max = -Infinity;
+          for(var i=0; i<arr.length; i++){
+            var v = arr[i];
+            if(!isFinite(v)) continue;
+            if(v > max) max = v;
+          }
+          return max === -Infinity ? NaN : max;
+        }
+        var globalMin = isFinite(rawPmin) ? rawPmin : finiteMin(lows);
+        var globalMax = isFinite(rawPmax) ? rawPmax : finiteMax(highs);
+        if(!isFinite(globalMin)) globalMin = 0;
+        if(!isFinite(globalMax)) globalMax = globalMin + 1;
+        if(globalMax === globalMin) globalMax = globalMin + 1;
+        var markersJsonEl = container.querySelector('.pc-markers-json');
+        var marksData = [];
+        if(markersJsonEl){
+          try{
+            marksData = JSON.parse(markersJsonEl.textContent || '[]');
+          }catch(err){
+            marksData = [];
+          }
+        }
+        if(!Array.isArray(marksData)){
+          marksData = [];
+        }
+        var marks = marksData.map(function(m){
+          var idxRaw = (m && (m.idx !== undefined ? m.idx : m.i)) || 0;
+          var idx = parseInt(idxRaw, 10);
+          var priceVal = parseFloat(m && m.price);
+          var indicators = {};
+          if(m && m.indicators && typeof m.indicators === 'object'){
+            Object.keys(m.indicators).forEach(function(key){
+              indicators[key] = m.indicators[key];
+            });
+          }
+          return {
+            i: isFinite(idx) ? idx : 0,
+            price: isFinite(priceVal) ? priceVal : NaN,
+            klass: (m && m.klass) ? m.klass : '',
+            type: (m && m.type) ? m.type : '',
+            indicators: indicators
+          };
+        });
         var cross = svg.querySelector('.pc-cross');
-        var hline = cross.querySelector('.cross-h');
-        var vline = cross.querySelector('.cross-v');
-        function show(evt){ cross.style.display=''; legend.style.display=''; move(evt); }
-        function hide(){ cross.style.display='none'; legend.style.display='none'; }
+        var hline = cross ? cross.querySelector('.cross-h') : null;
+        var vline = cross ? cross.querySelector('.cross-v') : null;
+        var barsG = svg.querySelector('g.bars');
+        var marksG = svg.querySelector('g.marks');
+        var counter = toolbar.querySelector('.pc-bars-count');
+        var scaleStep = 10;
+        var minBars = Math.min(n, scaleStep);
+        // Max visible bars in the viewport
+        var maxVisible = Math.min(n, 250);
+        // Default to max visible (others via scroll)
+        var defaultBars = maxVisible;
+        var targetBars = defaultBars || minBars;
+        if(targetBars < minBars){ targetBars = minBars; }
+        targetBars = Math.round(targetBars);
+        var offset = Math.max(0, n - targetBars);
+        var state = {
+          sx: (w - 2*pad) / Math.max(1, targetBars - 1),
+          sy: (h - 2*pad) / (globalMax - globalMin),
+          pmin: globalMin,
+          pmax: globalMax
+        };
+        var activeMarker = null;
+        function visibleBars(){ return Math.max(1, Math.min(maxVisible, Math.round(targetBars))); }
+        function clampOffset(){
+          var maxOff = Math.max(0, n - visibleBars());
+          if(offset > maxOff) offset = maxOff;
+          if(offset < 0) offset = 0;
+          return maxOff;
+        }
+        function priceToY(price, pmin, sy){
+          return h - pad - (price - pmin) * sy;
+        }
+        function formatPrice(value){
+          return isFinite(value) ? value.toFixed(5) : '';
+        }
+        function formatIndicatorValue(val){
+          if(val === null || val === undefined){
+            return '-';
+          }
+          if(typeof val === 'number' && isFinite(val)){
+            if(Math.abs(val) >= 1000 || Number.isInteger(val)){
+              return val.toString();
+            }
+            var trimmed = val.toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+            return trimmed.length ? trimmed : val.toString();
+          }
+          return String(val);
+        }
+        function formatBaseLegend(idx, price){
+          return (dts[idx] || '-') + '  ' + formatPrice(price);
+        }
+        function formatMarkerLegend(marker){
+          var text = formatBaseLegend(marker.i, marker.price);
+          var extras = [];
+          if(marker.type){
+            extras.push(marker.type);
+          }
+          var inds = marker.indicators || {};
+          var keys = Object.keys(inds).sort();
+          if(keys.length){
+            var parts = [];
+            keys.forEach(function(key){
+              parts.push(key + ': ' + formatIndicatorValue(inds[key]));
+            });
+            extras.push('Indicators: ' + parts.join(', '));
+          }
+          if(extras.length){
+            text += ' | ' + extras.join(' | ');
+          }
+          return text;
+        }
+        function render(){
+          var vb = visibleBars();
+          if(counter){
+            counter.textContent = n ? ('Bars: ' + vb + ' / ' + n) : ('Bars: ' + vb);
+          }
+          var useScroll = n > vb;
+          var maxOff = clampOffset();
+          if(!useScroll){
+            offset = Math.max(0, n - vb);
+            maxOff = clampOffset();
+          }
+          var sx = vb > 1 ? (w - 2*pad) / (vb - 1) : (w - 2*pad);
+          var start = offset;
+          var end = Math.min(n, offset + vb);
+          if(activeMarker && (activeMarker.i < start || activeMarker.i >= end)){
+            activeMarker = null;
+          }
+          var localMax = -Infinity;
+          var localMin = Infinity;
+          for(var idx=start; idx<end; idx++){
+            var hi = highs[idx];
+            var lo = lows[idx];
+            if(isFinite(hi) && hi > localMax) localMax = hi;
+            if(isFinite(lo) && lo < localMin) localMin = lo;
+          }
+          if(!isFinite(localMax)) localMax = finiteMax(highs);
+          if(!isFinite(localMin)) localMin = finiteMin(lows);
+          if(!isFinite(localMax) || !isFinite(localMin)){
+            localMax = globalMax;
+            localMin = globalMin;
+          }
+          if(localMax === localMin){
+            var adjust = Math.abs(localMax || 1) * 0.001;
+            if(!adjust) adjust = 0.001;
+            localMax += adjust;
+            localMin -= adjust;
+          }
+          var sy = (h - 2*pad) / (localMax - localMin);
+          state.sx = sx;
+          state.sy = sy;
+          state.pmin = localMin;
+          state.pmax = localMax;
+          barsG.innerHTML = '';
+          marksG.innerHTML = '';
+          var tw = Math.max(2.0, Math.min(6.0, sx * 0.35));
+          for(var i=start; i<end; i++){
+            var high = highs[i];
+            var low = lows[i];
+            if(!isFinite(high) || !isFinite(low)) continue;
+            var x = pad + (i - offset) * sx;
+            var ln1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            ln1.setAttribute('x1', x);
+            ln1.setAttribute('x2', x);
+            ln1.setAttribute('y1', priceToY(high, localMin, sy));
+            ln1.setAttribute('y2', priceToY(low, localMin, sy));
+            ln1.setAttribute('class', 'bar');
+            barsG.appendChild(ln1);
+            var openPrice = opens[i];
+            if(isFinite(openPrice)){
+              var ln2 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+              ln2.setAttribute('x1', x - tw);
+              ln2.setAttribute('x2', x);
+              ln2.setAttribute('y1', priceToY(openPrice, localMin, sy));
+              ln2.setAttribute('y2', priceToY(openPrice, localMin, sy));
+              ln2.setAttribute('class', 'bar');
+              barsG.appendChild(ln2);
+            }
+            var closePrice = closes[i];
+            if(isFinite(closePrice)){
+              var ln3 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+              ln3.setAttribute('x1', x);
+              ln3.setAttribute('x2', x + tw);
+              ln3.setAttribute('y1', priceToY(closePrice, localMin, sy));
+              ln3.setAttribute('y2', priceToY(closePrice, localMin, sy));
+              ln3.setAttribute('class', 'bar');
+              barsG.appendChild(ln3);
+            }
+          }
+          marks.forEach(function(m){
+            if(isNaN(m.price)) return;
+            if(m.i < start || m.i >= end) return;
+            var marker = {
+              i: m.i,
+              price: m.price,
+              klass: m.klass,
+              type: m.type,
+              indicators: m.indicators || {}
+            };
+            var markerX = pad + (marker.i - offset) * sx;
+            var markerY = priceToY(marker.price, localMin, sy);
+            var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', markerX);
+            circle.setAttribute('cy', markerY);
+            circle.setAttribute('r', 3.2);
+            circle.setAttribute('class', 'mk ' + marker.klass);
+            circle.addEventListener('mouseenter', function(){
+              activeMarker = marker;
+              if(cross){
+                if(hline){
+                  hline.setAttribute('x1', 0);
+                  hline.setAttribute('x2', w);
+                  hline.setAttribute('y1', markerY);
+                  hline.setAttribute('y2', markerY);
+                }
+                if(vline){
+                  vline.setAttribute('y1', 0);
+                  vline.setAttribute('y2', h);
+                  vline.setAttribute('x1', markerX);
+                  vline.setAttribute('x2', markerX);
+                }
+                cross.style.display = '';
+              }
+              if(legend){
+                legend.style.display = '';
+                legend.textContent = formatMarkerLegend(marker);
+              }
+            });
+            circle.addEventListener('mouseleave', function(){
+              activeMarker = null;
+            });
+            marksG.appendChild(circle);
+          });
+          scroll.max = maxOff;
+          scroll.value = offset;
+          scroll.disabled = !useScroll;
+          scroll.style.opacity = useScroll ? '1' : '0.35';
+          scroll.title = useScroll ? 'Horizontal scroll' : 'All bars visible';
+          if(activeMarker && legend){
+            legend.textContent = formatMarkerLegend(activeMarker);
+          }
+        }
+        function changeBars(delta){
+          if(!delta) return;
+          var next = targetBars + delta;
+          next = Math.round(next);
+          if(next < minBars) next = minBars;
+          if(next > maxVisible) next = maxVisible;
+          if(next === targetBars) return;
+          targetBars = next;
+          if(n <= targetBars){
+            offset = 0;
+          } else {
+            clampOffset();
+          }
+          render();
+        }
+        toolbar.querySelector('.pc-zoom-in').addEventListener('click', function(){ changeBars(-scaleStep); });
+        toolbar.querySelector('.pc-zoom-out').addEventListener('click', function(){ changeBars(scaleStep); });
+        var resetBtn = toolbar.querySelector('.pc-reset');
+        if(resetBtn){
+          resetBtn.addEventListener('click', function(){
+            targetBars = Math.min(n, maxVisible);
+            targetBars = Math.max(targetBars, minBars);
+            offset = Math.max(0, n - targetBars);
+            activeMarker = null;
+            render();
+          });
+        }
+        scroll.addEventListener('input', function(){
+          offset = parseInt(this.value || '0', 10) || 0;
+          clampOffset();
+          render();
+        });
+        function show(evt){
+          if(cross) cross.style.display = '';
+          if(legend) legend.style.display = '';
+          move(evt);
+        }
+        function hide(){
+          activeMarker = null;
+          if(cross) cross.style.display = 'none';
+          if(legend) legend.style.display = 'none';
+        }
         function move(evt){
-          var pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY;
+          if(!cross) return;
+          var sx = state.sx || 1;
+          if(activeMarker){
+            var markerX = pad + (activeMarker.i - offset) * sx;
+            var markerY = priceToY(activeMarker.price, state.pmin, state.sy || 1);
+            if(hline){
+              hline.setAttribute('x1', 0);
+              hline.setAttribute('x2', w);
+              hline.setAttribute('y1', markerY);
+              hline.setAttribute('y2', markerY);
+            }
+            if(vline){
+              vline.setAttribute('y1', 0);
+              vline.setAttribute('y2', h);
+              vline.setAttribute('x1', markerX);
+              vline.setAttribute('x2', markerX);
+            }
+            if(legend){
+              legend.textContent = formatMarkerLegend(activeMarker);
+            }
+            return;
+          }
+          var pt = svg.createSVGPoint();
+          pt.x = evt.clientX;
+          pt.y = evt.clientY;
           var loc = pt.matrixTransform(svg.getScreenCTM().inverse());
-          var x = Math.max(pad, Math.min(w-pad, loc.x));
-          var y = Math.max(pad, Math.min(h-pad, loc.y));
-          hline.setAttribute('x1', 0); hline.setAttribute('x2', w); hline.setAttribute('y1', y); hline.setAttribute('y2', y);
-          vline.setAttribute('y1', 0); vline.setAttribute('y2', h); vline.setAttribute('x1', x); vline.setAttribute('x2', x);
-          var idx = Math.round((x - pad)/sx); if(idx < 0) idx = 0; if(idx >= dts.length) idx = dts.length-1;
-          var price = pmax - ( (y - pad) * (pmax - pmin) / (h - 2*pad) );
-          legend.textContent = (dts[idx] || '-') + '  ' + price.toFixed(5);
+          var x = Math.max(pad, Math.min(w - pad, loc.x));
+          var y = Math.max(pad, Math.min(h - pad, loc.y));
+          if(hline){
+            hline.setAttribute('x1', 0);
+            hline.setAttribute('x2', w);
+            hline.setAttribute('y1', y);
+            hline.setAttribute('y2', y);
+          }
+          if(vline){
+            vline.setAttribute('y1', 0);
+            vline.setAttribute('y2', h);
+            vline.setAttribute('x1', x);
+            vline.setAttribute('x2', x);
+          }
+          var idx = Math.round((x - pad) / sx) + offset;
+          if(idx < 0) idx = 0;
+          if(idx >= n) idx = n - 1;
+          var price = state.pmin + ((h - pad - y) / (state.sy || 1));
+          if(!isFinite(price)) price = state.pmin;
+          if(legend){
+            legend.textContent = formatBaseLegend(idx, price);
+          }
         }
         svg.addEventListener('mouseenter', show);
         svg.addEventListener('mousemove', move);
         svg.addEventListener('mouseleave', hide);
+        render();
       })();
     </script>
   </div>
@@ -129,7 +645,10 @@
 
   {% if rules_clean %}
   <div class="rules-box card-flat">
-    <div class="rules-head">Trading Rules</div>
+    <div class="rules-head" style="display:flex; align-items:center; justify-content:space-between;">
+      <span>Trading Rules</span>
+      <button type="button" class="btn btn-pro" onclick="FlowModal.openFromElement('Rules Flowchart — {{ selected_system.system_sid }}', this.closest('.rules-box').querySelector('.rules-pre'))">Flowchart</button>
+    </div>
     <pre class="rules-pre">{{ rules_clean }}</pre>
   </div>
   {% endif %}

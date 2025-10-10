@@ -3,6 +3,7 @@ from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Max
+from django.db import connection
 from .models import (
     MT5ConnectionSettings,
     MT5ConnectionLog,
@@ -23,6 +24,8 @@ import csv
 import glob
 from pathlib import Path
 import json
+from numbers import Number
+from collections import deque, Counter
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 # Create your views here.
@@ -125,19 +128,70 @@ def system_dashboard(request):
         
         mt5_connections.append(connection_data)
     
-    # Получаем размер базы данных
+    # Получаем информацию о БД (движок и размер)
+    db_engine = "Неизвестно"
     db_size = "Неизвестно"
     try:
-        from django.conf import settings as django_settings
-        db_path = django_settings.DATABASES['default']['NAME']
-        if os.path.exists(db_path):
-            size = os.path.getsize(db_path)
-            if size < 1024:
-                db_size = f"{size} байт"
-            elif size < 1024 * 1024:
-                db_size = f"{size / 1024:.1f} КБ"
-            else:
-                db_size = f"{size / (1024 * 1024):.1f} МБ"
+        db_conf = django_settings.DATABASES.get('default', {})
+        engine = (db_conf.get('ENGINE') or '').lower()
+        db_engine = (
+            'PostgreSQL' if 'postgres' in engine else
+            'SQLite' if 'sqlite' in engine else
+            'MySQL' if 'mysql' in engine else
+            engine or 'Неизвестно'
+        )
+        # Проверка соединения и версия сервера
+        db_connected = False
+        db_version = None
+        try:
+            with connection.cursor() as cur:
+                if 'postgres' in engine:
+                    cur.execute('SELECT version()')
+                    row = cur.fetchone()
+                    db_version = (row[0] if row else None)
+                elif 'sqlite' in engine:
+                    cur.execute('select sqlite_version()')
+                    row = cur.fetchone()
+                    db_version = f"SQLite {row[0]}" if row else None
+                else:
+                    cur.execute('SELECT 1')
+                db_connected = True
+        except Exception as conn_err:
+            db_connected = False
+            db_version = None
+        if 'sqlite' in engine:
+            db_path = db_conf.get('NAME')
+            if isinstance(db_path, (Path,)):
+                db_path = str(db_path)
+            if db_path and os.path.exists(db_path):
+                size = os.path.getsize(db_path)
+                if size < 1024:
+                    db_size = f"{size} байт"
+                elif size < 1024 * 1024:
+                    db_size = f"{size / 1024:.1f} КБ"
+                elif size < 1024 * 1024 * 1024:
+                    db_size = f"{size / (1024 * 1024):.1f} МБ"
+                else:
+                    db_size = f"{size / (1024 * 1024 * 1024):.2f} ГБ"
+        elif 'postgres' in engine:
+            # Используем pg_database_size для текущей БД
+            try:
+                with connection.cursor() as cur:
+                    cur.execute("SELECT pg_database_size(current_database())")
+                    row = cur.fetchone()
+                    size = int(row[0]) if row and row[0] is not None else None
+                if size is not None:
+                    if size < 1024:
+                        db_size = f"{size} байт"
+                    elif size < 1024 * 1024:
+                        db_size = f"{size / 1024:.1f} КБ"
+                    elif size < 1024 * 1024 * 1024:
+                        db_size = f"{size / (1024 * 1024):.1f} МБ"
+                    else:
+                        db_size = f"{size / (1024 * 1024 * 1024):.2f} ГБ"
+            except Exception:
+                # В случае ошибки просто оставляем "Неизвестно"
+                pass
     except Exception:
         pass
     
@@ -155,6 +209,9 @@ def system_dashboard(request):
         'system_uptime': system_uptime,
         'active_connections': active_connections,
         'db_size': db_size,
+        'db_engine': db_engine,
+        'db_connected': locals().get('db_connected', False),
+        'db_version': locals().get('db_version'),
     }
     
     return render(request, 'main/system_dashboard.html', context)
@@ -1180,8 +1237,29 @@ def trading_history_ts(request):
     total_pips = 0.0
     wins = 0
     total = 0
+    open_queues = {'BUY': deque(), 'SELL': deque()}
     selected_tf = None
     base_level = 1
+    evs = []  # ensure defined even if no system configured
+    # Parse starting balance for $ PnL view (form field)
+    try:
+        balance_raw = (request.GET.get('balance') or '').replace(',', '.').strip()
+        start_balance = float(balance_raw) if balance_raw not in ('', None) else 10000.0
+    except Exception:
+        start_balance = 10000.0
+    # Lot size: default from system, but override from form if provided
+    def _sys_lot():
+        try:
+            return float(getattr(system, 'lot_size', 0.01) or 0.01)
+        except Exception:
+            return 0.01
+    try:
+        lot_raw = (request.GET.get('lot') or '').replace(',', '.').strip()
+        lot_size_used = float(lot_raw) if lot_raw not in ('', None) else _sys_lot()
+        if lot_size_used < 0:
+            lot_size_used = _sys_lot()
+    except Exception:
+        lot_size_used = _sys_lot()
     if system:
         try:
             base_level = getattr(system, 'signal_settings', None).signal_base_tf_level or 1
@@ -1206,106 +1284,63 @@ def trading_history_ts(request):
             pass
         evs = list(qs.order_by('event_time'))  # oldest→newest for sequential pairing
 
-        # Completed cycles stats (overall/buy/sell) within the same window as table
-        cycles_done_buy = cycles_done_sell = 0
-        side_count = {'BUY': 0, 'SELL': 0}
-        side_started = {'BUY': False, 'SELL': False}
+        pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
+        open_queues['BUY'].clear()
+        open_queues['SELL'].clear()
+
+        spread_pips = 0.0
+        try:
+            spread_pips = float(getattr(system, 'spread_pips', 0) or 0.0)
+        except Exception:
+            spread_pips = 0.0
+
+        def record_trade(open_event, close_event):
+            nonlocal total_pips, total, wins
+            open_price = _get_close_for_event(open_event)
+            close_price = _get_close_for_event(close_event)
+            pnl = None
+            if open_price is not None and close_price is not None:
+                if open_event.direction == 'BUY':
+                    pnl = (close_price - open_price) * pip_scale
+                else:
+                    pnl = (open_price - close_price) * pip_scale
+                # Apply spread per trade (in pips)
+                if spread_pips:
+                    pnl -= spread_pips
+                total_pips += pnl
+                total += 1
+                if pnl > 0:
+                    wins += 1
+            trades.append({
+                'open_time': open_event.event_time,
+                'open_dir': open_event.direction,
+                'open_price': open_price,
+                'open_id': getattr(open_event, 'id', None),
+                'close_time': close_event.event_time,
+                'close_price': close_price,
+                'close_id': getattr(close_event, 'id', None),
+                'cycle_uid': getattr(open_event, 'cycle_uid', None) or getattr(close_event, 'cycle_uid', None),
+                'pips': pnl,
+            })
+
+        def close_positions(side, close_event):
+            queue = open_queues[side]
+            while queue:
+                record_trade(queue.popleft(), close_event)
+
         for ev in evs:
-            act = getattr(ev, 'action', 'OPEN')
+            action = getattr(ev, 'action', 'OPEN')
             side = getattr(ev, 'direction', None)
             if side not in ('BUY', 'SELL'):
                 continue
-            if act == 'OPEN':
-                if side_count[side] == 0:
-                    side_started[side] = True
-                side_count[side] += 1
-            else:  # CLOSE
-                if side_count[side] > 0:
-                    side_count[side] -= 1
-                    if side_count[side] == 0 and side_started[side]:
-                        if side == 'BUY':
-                            cycles_done_buy += 1
-                        else:
-                            cycles_done_sell += 1
-                        side_started[side] = False
-        cycles_done_all = cycles_done_buy + cycles_done_sell
-
-        pip_scale = 100 if 'JPY' in (system.symbol or '').upper() else 10000
-        open_ev = None
-        for ev in evs:
-            action = getattr(ev, 'action', 'OPEN')
             if action == 'OPEN':
-                if open_ev is None:
-                    open_ev = ev
-                else:
-                    # Treat as reversal ONLY if direction changes
-                    if ev.direction and open_ev.direction and ev.direction != open_ev.direction:
-                        close_ev = ev
-                        open_price = _get_close_for_event(open_ev)
-                        close_price = _get_close_for_event(close_ev)
-                        pnl = None
-                        if open_price is not None and close_price is not None:
-                            pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
-                            total_pips += pnl
-                            total += 1
-                            if pnl > 0:
-                                wins += 1
-                        trades.append({
-                            'open_time': open_ev.event_time,
-                            'open_dir': open_ev.direction,
-                            'open_price': open_price,
-                            'open_id': getattr(open_ev, 'id', None),
-                            'close_time': close_ev.event_time,
-                            'close_price': close_price,
-                            'close_id': getattr(close_ev, 'id', None),
-                            'pips': pnl,
-                        })
-                        open_ev = ev  # start new trade after reversal
-                    else:
-                        # Same-direction OPEN: do not close, keep earliest open as the trade anchor
-                        pass
+                opposite = 'SELL' if side == 'BUY' else 'BUY'
+                if open_queues[opposite]:
+                    close_positions(opposite, ev)
+                open_queues[side].append(ev)
             else:  # CLOSE
-                if open_ev is not None:
-                    close_ev = ev
-                    open_price = _get_close_for_event(open_ev)
-                    close_price = _get_close_for_event(close_ev)
-                    pnl = None
-                    if open_price is not None and close_price is not None:
-                        pnl = (close_price - open_price) * pip_scale if open_ev.direction == 'BUY' else (open_price - close_price) * pip_scale
-                        total_pips += pnl
-                        total += 1
-                        if pnl > 0:
-                            wins += 1
-                    trades.append({
-                        'open_time': open_ev.event_time,
-                        'open_dir': open_ev.direction,
-                        'open_price': open_price,
-                        'open_id': getattr(open_ev, 'id', None),
-                        'close_time': close_ev.event_time,
-                        'close_price': close_price,
-                        'close_id': getattr(close_ev, 'id', None),
-                        'pips': pnl,
-                    })
-                    open_ev = None
-
-    # Compute currently open positions (no Close yet)
-    open_stack = []
-    for ev in evs:
-        act = getattr(ev, 'action', 'OPEN')
-        if act == 'OPEN':
-            if not open_stack:
-                open_stack.append(ev)
-            else:
-                if open_stack[-1].direction and ev.direction and open_stack[-1].direction != ev.direction:
-                    # Reversal: close all previous and start new stack with this OPEN
-                    open_stack = [ev]
-                else:
-                    # Same direction: treat as additional open position
-                    open_stack.append(ev)
-        else:  # CLOSE
-            # Remove all positions of that side
-            side = ev.direction
-            open_stack = [x for x in open_stack if x.direction != side]
+                if open_queues[side]:
+                    close_positions(side, ev)
 
     # Determine current price from the smallest TF feed bound to this system
     cur_price = None
@@ -1351,22 +1386,107 @@ def trading_history_ts(request):
             cur_price = None
 
     open_positions = []
-    for oe in open_stack:
-        op = float(_get_close_for_event(oe) or 0)
+    remaining_opens = []
+    for queue in open_queues.values():
+        remaining_opens.extend(list(queue))
+    remaining_opens.sort(key=lambda ev: getattr(ev, 'event_time', None))
+    for oe in remaining_opens:
+        op = _get_close_for_event(oe)
+        op_val = float(op) if op is not None else None
         unreal = None
-        if cur_price is not None and op:
+        if cur_price is not None and op_val is not None:
             if oe.direction == 'BUY':
-                unreal = (cur_price - op) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
+                unreal = (cur_price - op_val) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
             else:
-                unreal = (op - cur_price) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
+                unreal = (op_val - cur_price) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
         open_positions.append({
             'open_time': oe.event_time,
             'open_dir': oe.direction,
-            'open_price': op if op else None,
+            'open_price': op_val,
             'cur_price': cur_price,
             'open_pnl': unreal,
             'open_id': getattr(oe, 'id', None),
         })
+
+    # Compute completed cycles using SignalEvent.cycle_uid where possible.
+    # A completed cycle is counted when a cycle_uid has both OPEN and CLOSE for the same side.
+    cycles_done_buy = cycles_done_sell = 0
+    try:
+        u_open_buy = set()
+        u_open_sell = set()
+        u_close_buy = set()
+        u_close_sell = set()
+        for ev in evs:
+            uid = getattr(ev, 'cycle_uid', None)
+            if not uid:
+                continue
+            if getattr(ev, 'direction', None) == 'BUY':
+                (u_open_buy if ev.action == 'OPEN' else u_close_buy).add(uid)
+            elif getattr(ev, 'direction', None) == 'SELL':
+                (u_open_sell if ev.action == 'OPEN' else u_close_sell).add(uid)
+        cycles_done_buy = len(u_open_buy.intersection(u_close_buy))
+        cycles_done_sell = len(u_open_sell.intersection(u_close_sell))
+        # Fallback for legacy rows without cycle_uid: approximate by number of CLOSE events per side
+        if cycles_done_buy == 0 and cycles_done_sell == 0:
+            cycles_done_buy = sum(1 for ev in evs if ev.direction == 'BUY' and ev.action == 'CLOSE')
+            cycles_done_sell = sum(1 for ev in evs if ev.direction == 'SELL' and ev.action == 'CLOSE')
+    except Exception:
+        cycles_done_buy = sum(1 for ev in evs if ev.direction == 'BUY' and ev.action == 'CLOSE')
+        cycles_done_sell = sum(1 for ev in evs if ev.direction == 'SELL' and ev.action == 'CLOSE')
+    cycles_done_all = cycles_done_buy + cycles_done_sell
+
+    # Cycle PnL statistics (group trades by cycle UID)
+    cycle_pnls = {}
+    for t in trades:
+        uid = t.get('cycle_uid')
+        p = t.get('pips')
+        if uid and p is not None:
+            try:
+                cycle_pnls[uid] = cycle_pnls.get(uid, 0.0) + float(p)
+            except Exception:
+                continue
+    profits = [v for v in cycle_pnls.values() if v > 0]
+    losses = [v for v in cycle_pnls.values() if v < 0]
+    # Count trades per cycle (how many closed trades inside each cycle)
+    cycle_counts = {}
+    for t in trades:
+        uid = t.get('cycle_uid')
+        if uid:
+            cycle_counts[uid] = cycle_counts.get(uid, 0) + 1
+    counts_list = list(cycle_counts.values())
+    kpi_trades_per_cycle_avg = (sum(counts_list) / len(counts_list)) if counts_list else 0.0
+    kpi_trades_per_cycle_max = max(counts_list) if counts_list else 0
+    # Distribution: how many cycles had N trades
+    kpi_cycle_dist = []
+    kpi_cycle_dist_max = 0
+    if counts_list:
+        hist = Counter(counts_list)
+        kpi_cycle_dist = sorted(hist.items())  # list of (trades_per_cycle, cycles_count)
+        try:
+            kpi_cycle_dist_max = max(qty for _, qty in kpi_cycle_dist)
+        except ValueError:
+            kpi_cycle_dist_max = 0
+
+    # Profit by number of trades per cycle: sum of PnL across cycles with same count
+    kpi_profit_by_count = []  # list[dict]
+    kpi_profit_by_count_max_abs = 0.0
+    if cycle_pnls:
+        agg: Dict[int, float] = {}
+        for uid, pnl in cycle_pnls.items():
+            cnt = cycle_counts.get(uid, 0)
+            agg[cnt] = agg.get(cnt, 0.0) + float(pnl or 0.0)
+        raw_pairs = sorted(agg.items())
+        kpi_profit_by_count = [
+            {'count': c, 'sum': s, 'abs': abs(s), 'pos': (s > 0), 'neg': (s < 0)}
+            for c, s in raw_pairs
+        ]
+        kpi_profit_by_count_max_abs = max((item['abs'] for item in kpi_profit_by_count), default=0.0)
+    def _avg(vals):
+        return (sum(vals) / len(vals)) if vals else 0.0
+    kpi_cycle_profit_avg = _avg(profits)
+    kpi_cycle_profit_max = max(profits) if profits else 0.0
+    kpi_cycle_loss_avg = _avg(losses)
+    kpi_cycle_loss_max = (min(losses) if losses else 0.0)  # most negative
 
     # Build cumulative PnL series from closed trades for sparklines
     vals_all = []
@@ -1382,6 +1502,8 @@ def trading_history_ts(request):
             s_sell += p
         vals_buy.append(s_buy)
         vals_sell.append(s_sell)
+    kpi_cum_buy_total = s_buy
+    kpi_cum_sell_total = s_sell
 
     # Overlay additions for sparklines and KPI Open PnL
     open_all_add = sum((p.get('open_pnl') or 0.0) for p in open_positions)
@@ -1550,65 +1672,117 @@ def trading_history_ts(request):
 
     # Build OHLC bars chart for base TF (last ~240 bars)
     price_chart = None
+    kpi_buy_hold = 0.0
+    kpi_short_hold = 0.0
     try:
         chart_bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
         if chart_bind and chart_bind.feed_id:
-            N = 240
-            bars = list(MarketBar.objects.filter(feed=chart_bind.feed).order_by('-dt')[:N])
-            bars.reverse()
+            # Load all available bars for the bound feed at Base TF level
+            # Full history (chronological order)
+            bars = list(MarketBar.objects.filter(feed=chart_bind.feed).order_by('dt'))
             if bars:
-                highs = [float(b.high) for b in bars]
-                lows = [float(b.low) for b in bars]
-                pmax = max(highs); pmin = min(lows)
-                if pmax == pmin:
-                    pmax += 1e-6
+                try:
+                    first_c = float(getattr(bars[0], 'close')) if getattr(bars[0], 'close', None) is not None else None
+                    last_c = float(getattr(bars[-1], 'close')) if getattr(bars[-1], 'close', None) is not None else None
+                    if first_c is not None and last_c is not None:
+                        kpi_buy_hold = (last_c - first_c) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
+                        kpi_short_hold = (first_c - last_c) * (100 if 'JPY' in (system.symbol or '').upper() else 10000)
+                except Exception:
+                    kpi_buy_hold = kpi_buy_hold or 0.0
+                    kpi_short_hold = kpi_short_hold or 0.0
+                def _to_float(val):
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return None
+                highs_vals = [_to_float(b.high) for b in bars]
+                lows_vals = [_to_float(b.low) for b in bars]
+                opens_vals = [_to_float(b.open) for b in bars]
+                closes_vals = [_to_float(b.close) for b in bars]
+                valid_highs = [v for v in highs_vals if v is not None]
+                valid_lows = [v for v in lows_vals if v is not None]
+                if valid_highs and valid_lows:
+                    pmax = max(valid_highs)
+                    pmin = min(valid_lows)
+                    if pmax == pmin:
+                        pmax += 1e-6
+                else:
+                    pmax = 1.0
+                    pmin = 0.0
                 w = 900; h = 220; pad = 6
                 n = len(bars)
                 sx = (w - 2*pad) / max(1, (n - 1))
-                tw = max(2.0, min(6.0, sx * 0.35))  # open/close tick length
-                def y_of(v: float) -> float:
-                    sy = (h - 2*pad) / (pmax - pmin)
-                    return h - pad - (v - pmin) * sy
-                out = []
-                time_to_x = {}
                 dts = []
-                for i, b in enumerate(bars):
+                from django.utils import timezone as dj_tz
+                for b in bars:
                     try:
-                        x = pad + i * sx
-                        yh = y_of(float(b.high)); yl = y_of(float(b.low))
-                        yo = y_of(float(b.open)); yc = y_of(float(b.close))
-                        out.append({'x': f"{x:.1f}", 'yh': f"{yh:.1f}", 'yl': f"{yl:.1f}",
-                                    'yo': f"{yo:.1f}", 'yc': f"{yc:.1f}",
-                                    'xl': f"{(x - tw):.1f}", 'xr': f"{(x + tw):.1f}"})
-                        time_to_x[getattr(b, 'dt')] = x
-                        try:
-                            dts.append(getattr(b, 'dt').strftime('%Y-%m-%d %H:%M:%S'))
-                        except Exception:
-                            dts.append(str(getattr(b, 'dt')))
+                        dtv = getattr(b, 'dt')
+                        dt_local = dj_tz.localtime(dtv) if dj_tz.is_aware(dtv) else dtv
+                        dts.append(dt_local.strftime('%Y-%m-%d %H:%M:%S'))
                     except Exception:
-                        continue
-                # Markers for signals aligned to bar times
+                        dts.append(str(getattr(b, 'dt')))
                 markers = []
                 try:
+                    dt_to_idx = {getattr(b, 'dt'): i for i, b in enumerate(bars)}
                     for ev in evs:
                         dt_e = getattr(ev, 'event_time', None)
-                        if dt_e in time_to_x:
-                            x = time_to_x[dt_e]
-                            # y at open for OPEN, at close for CLOSE
-                            # Find corresponding bar again by dt
-                            mb = next((b for b in bars if getattr(b, 'dt') == dt_e), None)
+                        if dt_e in dt_to_idx:
+                            idx = dt_to_idx[dt_e]
+                            mb = bars[idx] if 0 <= idx < len(bars) else None
                             if not mb:
                                 continue
-                            y = y_of(float(mb.close if getattr(ev, 'action', 'OPEN') == 'CLOSE' else mb.open))
-                            mtype = 'buy-open' if ev.action == 'OPEN' and ev.direction == 'BUY' else \
-                                    ('sell-open' if ev.action == 'OPEN' and ev.direction == 'SELL' else \
-                                     ('buy-close' if ev.action == 'CLOSE' and ev.direction == 'BUY' else \
-                                      ('sell-close' if ev.action == 'CLOSE' and ev.direction == 'SELL' else 'other')))
-                            markers.append({'cx': f"{x:.1f}", 'cy': f"{y:.1f}", 'klass': mtype})
+                            action = getattr(ev, 'action', 'OPEN')
+                            direction = getattr(ev, 'direction', '')
+                            price_val = _to_float(mb.close if action == 'CLOSE' else mb.open)
+                            if price_val is None:
+                                continue
+                            raw_ind = getattr(ev, 'ind_values', None)
+                            indicators = {}
+                            if isinstance(raw_ind, dict):
+                                for key, val in raw_ind.items():
+                                    key_str = str(key)
+                                    if isinstance(val, bool):
+                                        indicators[key_str] = bool(val)
+                                    elif isinstance(val, int):
+                                        indicators[key_str] = int(val)
+                                    elif isinstance(val, Number):
+                                        try:
+                                            indicators[key_str] = float(val)
+                                        except Exception:
+                                            indicators[key_str] = float(val)
+                                    else:
+                                        indicators[key_str] = str(val)
+                            mtype = 'buy-open' if action == 'OPEN' and direction == 'BUY' else \
+                                    ('sell-open' if action == 'OPEN' and direction == 'SELL' else \
+                                     ('buy-close' if action == 'CLOSE' and direction == 'BUY' else \
+                                      ('sell-close' if action == 'CLOSE' and direction == 'SELL' else 'other')))
+                            markers.append({
+                                'idx': idx,
+                                'price': price_val,
+                                'klass': mtype,
+                                'type': f"{direction or ''} {action or ''}".strip(),
+                                'indicators': indicators,
+                            })
                 except Exception:
                     pass
-                price_chart = {'w': w, 'h': h, 'bars': out, 'markers': markers,
-                               'pmin': f"{pmin:.6f}", 'pmax': f"{pmax:.6f}", 'pad': pad, 'sx': f"{sx:.3f}", 'dts': dts}
+                def _fmt(val):
+                    return f"{val:.6f}" if val is not None else "nan"
+                price_chart = {
+                    'w': w,
+                    'h': h,
+                    'markers': markers,
+                    'markers_json': json.dumps(markers),
+                    'pmin': f"{pmin:.6f}",
+                    'pmax': f"{pmax:.6f}",
+                    'pad': pad,
+                    'sx': f"{sx:.3f}",
+                    'dts': dts,
+                    'n': n,
+                    'highs': [_fmt(v) for v in highs_vals],
+                    'lows': [_fmt(v) for v in lows_vals],
+                    'opens': [_fmt(v) for v in opens_vals],
+                    'closes': [_fmt(v) for v in closes_vals],
+                }
     except Exception:
         price_chart = None
 
@@ -1627,11 +1801,31 @@ def trading_history_ts(request):
     except Exception:
         rules_clean = ''
 
+    # Relative performance vs Buy&Hold metrics
+    kpi_pnl_vs_bh = (total_pips - (kpi_buy_hold or 0.0))
+    kpi_buy_vs_bh = (kpi_cum_buy_total - (kpi_buy_hold or 0.0))
+    kpi_sell_vs_sh = (kpi_cum_sell_total - (kpi_short_hold or 0.0))
+
+    def _pct(delta, base):
+        try:
+            b = float(base or 0.0)
+            if abs(b) < 1e-9:
+                return None
+            return float(delta) / abs(b) * 100.0
+        except Exception:
+            return None
+
+    kpi_pnl_vs_bh_pct = _pct(kpi_pnl_vs_bh, kpi_buy_hold)
+    kpi_buy_vs_bh_pct = _pct(kpi_buy_vs_bh, kpi_buy_hold)
+    kpi_sell_vs_sh_pct = _pct(kpi_sell_vs_sh, kpi_short_hold)
+
     context = {
         'systems': systems,
         'selected_system': system,
         'selected_tf': selected_tf,
         'base_level': base_level,
+        'form_balance': start_balance,
+        'form_lot': lot_size_used,
         'trades': list(reversed(trades)),
         'total_pips': total_pips,
         'win_rate': win_rate,
@@ -1646,13 +1840,171 @@ def trading_history_ts(request):
         'kpi_dir_mix': {'buy_pct': buy_pct, 'sell_pct': sell_pct},
         'kpi_open_pnl': sum((p.get('open_pnl') or 0.0) for p in open_positions),
         'kpi_cycles': {'all': cycles_done_all, 'buy': cycles_done_buy, 'sell': cycles_done_sell},
+        'kpi_cycle_profit_avg': kpi_cycle_profit_avg,
+        'kpi_cycle_profit_max': kpi_cycle_profit_max,
+        'kpi_cycle_loss_avg': kpi_cycle_loss_avg,
+        'kpi_cycle_loss_max': kpi_cycle_loss_max,
+        'kpi_trades_per_cycle_avg': kpi_trades_per_cycle_avg,
+        'kpi_trades_per_cycle_max': kpi_trades_per_cycle_max,
+        'kpi_cycle_dist': kpi_cycle_dist,
+        'kpi_cycle_dist_max': kpi_cycle_dist_max,
+        'kpi_profit_by_count': kpi_profit_by_count,
+        'kpi_profit_by_count_max_abs': kpi_profit_by_count_max_abs,
         'spark_overall': spark_overall,
         'spark_buy': spark_buy,
         'spark_sell': spark_sell,
         'rules_clean': rules_clean,
         'open_positions': open_positions,
         'price_chart': price_chart,
+        'kpi_buy_hold': kpi_buy_hold,
+        'kpi_short_hold': kpi_short_hold,
+        'kpi_pnl_vs_bh': kpi_pnl_vs_bh,
+        'kpi_buy_vs_bh': kpi_buy_vs_bh,
+        'kpi_sell_vs_sh': kpi_sell_vs_sh,
+        'kpi_cum_buy_total': kpi_cum_buy_total,
+        'kpi_cum_sell_total': kpi_cum_sell_total,
+        'kpi_pnl_vs_bh_pct': kpi_pnl_vs_bh_pct,
+        'kpi_buy_vs_bh_pct': kpi_buy_vs_bh_pct,
+        'kpi_sell_vs_sh_pct': kpi_sell_vs_sh_pct,
     }
+
+    # PnL in USD using simple pip value per lot (approx $10 per pip per 1.0 lot)
+    # Prefer real tick math from MT5 if available
+    mt5_tick_size = None
+    mt5_tick_value = None
+    usd_per_tick_lot1 = None
+    usd_per_tick_used = None
+    mt5_tick_reason = None
+    try:
+        sym = getattr(system, 'symbol', None)
+        if sym:
+            from .services.mt5_service import MT5Manager
+            import MetaTrader5 as mt5
+            svc = MT5Manager.get_default_service()
+            connected = False
+            found = False
+            if svc:
+                with svc as s:
+                    if s.is_connected:
+                        connected = True
+                        mt5_tick_source = 'service'
+                        cand = str(sym).strip()
+                        tried = []
+                        # helper that tries symbol_info first (trade_*), then doubles
+                        def _probe_any(name):
+                            try:
+                                tried.append(name)
+                                mt5.symbol_select(name, True)
+                                info = mt5.symbol_info(name)
+                                ts = getattr(info, 'trade_tick_size', None) if info else None
+                                tv = getattr(info, 'trade_tick_value', None) if info else None
+                                if ts and tv and ts > 0 and tv > 0:
+                                    return (ts, tv, name, 'info')
+                                # fallback to doubles
+                                ts = mt5.symbol_info_double(name, mt5.SYMBOL_TRADE_TICK_SIZE)
+                                tv = mt5.symbol_info_double(name, mt5.SYMBOL_TRADE_TICK_VALUE)
+                                if ts and tv and ts > 0 and tv > 0:
+                                    return (ts, tv, name, 'double')
+                            except Exception:
+                                pass
+                            return (None, None, None, None)
+                        for nm in [cand, cand.upper(), cand.lower()]:
+                            tsz, tvl, used, via = _probe_any(nm)
+                            if tsz and tvl:
+                                mt5_tick_size = float(tsz)
+                                mt5_tick_value = float(tvl)
+                                usd_per_tick_lot1 = mt5_tick_value
+                                usd_per_tick_used = mt5_tick_value * lot_size_used
+                                found = True
+                                mt5_tick_symbol_used = used
+                                mt5_tick_method = via
+                                break
+                        if not found and hasattr(mt5, 'symbols_get'):
+                            try:
+                                all_syms = mt5.symbols_get()
+                                # exact ci match
+                                match = next((si.name for si in all_syms or [] if getattr(si, 'name', '').lower() == cand.lower()), None)
+                                if not match:
+                                    base = ''.join([c for c in cand if c.isalnum()]).upper()
+                                    for si in all_syms or []:
+                                        nm = getattr(si, 'name', '')
+                                        if nm and (nm.replace('.', '').upper().startswith(base) or base.startswith(nm.replace('.', '').upper())):
+                                            match = nm; break
+                                if match:
+                                    tsz, tvl, used, via = _probe_any(match)
+                                    if tsz and tvl:
+                                        mt5_tick_size = float(tsz)
+                                        mt5_tick_value = float(tvl)
+                                        usd_per_tick_lot1 = mt5_tick_value
+                                        usd_per_tick_used = mt5_tick_value * lot_size_used
+                                        found = True
+                                        mt5_tick_symbol_used = used
+                                        mt5_tick_method = via
+                                    else:
+                                        mt5_tick_reason = f"Symbol '{sym}' exists but no tick info (0 values). Try opening a chart for {match} in MT5 and refresh."
+                                else:
+                                    mt5_tick_reason = f"Symbol '{sym}' not found among {len(all_syms or [])} symbols. Tried: {', '.join(tried[:3])}"
+                            except Exception:
+                                pass
+            # No direct initialize fallback anymore — require default service
+            if not found:
+                if not connected:
+                    mt5_tick_reason = 'MT5 is not connected. Configure default connection or open the terminal; then refresh.'
+                else:
+                    mt5_tick_reason = f"Symbol '{sym}' not found or not active in MarketWatch. Add/show the symbol in MT5 and refresh."
+    except Exception:
+        pass
+
+    pip_value_per_lot_usd = None
+    # Convert pips→USD using either MT5 tick math or fallback $10/pip
+    pip_size = (1.0 / pip_scale) if 'pip_scale' in locals() and pip_scale else 0.0001
+    if mt5_tick_size and mt5_tick_value:
+        usd_per_price_unit_per_lot = (1.0 / mt5_tick_size) * mt5_tick_value
+        pip_value_per_lot_usd = usd_per_price_unit_per_lot * pip_size
+    else:
+        pip_value_per_lot_usd = 10.0
+
+    profit_usd = float(total_pips) * pip_value_per_lot_usd * lot_size_used
+    context['kpi_profit_usd'] = profit_usd
+    context['kpi_end_balance'] = start_balance + profit_usd
+
+    # Capital sufficiency metrics relative to starting balance
+    try:
+        cum_usd_series = [(v if isinstance(v, (int, float)) else float(v)) * pip_value_per_lot_usd * lot_size_used for v in vals_all]
+    except Exception:
+        cum_usd_series = []
+    min_cum_usd = (min(cum_usd_series) if cum_usd_series else 0.0)
+    min_equity = start_balance + min_cum_usd
+    capital_needed = max(0.0, -min_cum_usd)
+    ret_pct = (profit_usd / start_balance * 100.0) if start_balance else None
+    need_pct = (capital_needed / start_balance * 100.0) if start_balance else None
+    context.update({
+        'kpi_min_equity': min_equity,
+        'kpi_capital_needed': capital_needed,
+        'kpi_return_pct': ret_pct,
+        'kpi_capital_needed_pct': need_pct,
+    })
+
+    # Equity spark (USD)
+    try:
+        equity_series = [start_balance + v for v in cum_usd_series]
+    except Exception:
+        equity_series = []
+    spark_equity = _spark(equity_series) if equity_series else {'w': 160, 'h': 30, 'path': '', 'overlay': '', 'zero_y': 15}
+    context['spark_equity'] = spark_equity
+    context['mt5_tick_size'] = mt5_tick_size
+    context['mt5_tick_value'] = mt5_tick_value
+    context['mt5_usd_per_tick_lot'] = usd_per_tick_used
+    # Fill diagnostics defaults if values resolved but meta not set
+    if (mt5_tick_size and mt5_tick_value) and not (locals().get('mt5_tick_source')):
+        mt5_tick_source = 'unknown'
+        mt5_tick_symbol_used = sym
+        mt5_tick_method = 'unknown'
+    context['mt5_tick_reason'] = mt5_tick_reason
+    context['mt5_tick_source'] = locals().get('mt5_tick_source')
+    context['mt5_tick_symbol_used'] = locals().get('mt5_tick_symbol_used') or sym
+    context['mt5_tick_method'] = locals().get('mt5_tick_method')
+
     return render(request, 'main/trading_history_ts.html', context)
 
 
