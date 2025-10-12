@@ -3,92 +3,167 @@
 {% block title %}Home - Project GCE 3{% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="card-header">
-        <h2 class="card-title">🚀 Welcome to Project GCE 3!</h2>
-        <p class="card-subtitle">MetaTrader5 Integration System</p>
-    </div>
-    
-    <div class="row">
-        <div class="col">
-            <p><strong>System Status:</strong> Active and ready to work</p>
-            <p><strong>Django Version:</strong> 5.2.6</p>
-            <p><strong>MetaTrader5:</strong> {% if mt5_available %}✅ Library connected{% else %}❌ Library not available{% endif %}</p>
-        </div>
-    </div>
-
-    <div class="dashboard-grid">
-        <div class="metric-card">
-            <div class="metric-value">3</div>
-            <div class="metric-label">Active Modules</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">{% if mt5_settings_count %}{{ mt5_settings_count }}{% else %}0{% endif %}</div>
-            <div class="metric-label">MT5 Settings</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">100%</div>
-            <div class="metric-label">System Uptime</div>
-        </div>
-    </div>
-
-    <div style="margin-top: 2rem;">
-        <h3>🔧 Quick Actions:</h3>
-        <div style="margin-top: 1rem; display: flex; gap: 1rem; flex-wrap: wrap;">
-            <a href="{% url 'main:system_dashboard' %}" class="btn btn-primary">
-                ⚙️ System Dashboard
-            </a>
-            <a href="{% url 'main:trading_history' %}" class="btn btn-secondary">
-                📈 Trading History
-            </a>
-            <a href="/admin/" class="btn btn-secondary" target="_blank">
-                🔧 Admin Panel
-            </a>
-        </div>
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-header">
-        <h3 class="card-title">📊 Обзор системы</h3>
-    </div>
-    
-    <div class="alert alert-info">
-        <strong>Информация:</strong> Система готова к подключению MetaTrader5. 
-        Для настройки перейдите в <a href="/admin/">админ панель</a> и добавьте настройки MT5.
-    </div>
-
-    <table class="table">
-        <thead>
-            <tr>
-                <th>Компонент</th>
-                <th>Статус</th>
-                <th>Описание</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>Django Framework</td>
-                <td><span class="status connected">✅ Активен</span></td>
-                <td>Веб-фреймворк работает корректно</td>
-            </tr>
-            <tr>
-                <td>MetaTrader5 Library</td>
-                <td>
-                    {% if mt5_available %}
-                        <span class="status connected">✅ Подключена</span>
-                    {% else %}
-                        <span class="status disconnected">❌ Не доступна</span>
-                    {% endif %}
-                </td>
-                <td>Библиотека для работы с MT5</td>
-            </tr>
-            <tr>
-                <td>База данных</td>
-                <td><span class="status connected">✅ Подключена</span></td>
-                <td>SQLite база данных</td>
-            </tr>
-        </tbody>
+<div class="card card-flat">
+  <div class="card-header" style="border-bottom:1px solid #e6e9ee; margin-bottom:1rem; padding-bottom:.75rem;">
+    <h2 class="page-title-pro">System Overview</h2>
+    <div class="text-subtle">Основные метрики работы системы</div>
+  </div>
+  <div class="kpi-table-wrap">
+    <table class="kpi-table">
+      <tr>
+        <td>
+          <span class="kpi-k">System Uptime</span>
+          <span class="kpi-v {% if system_uptime %}kpi-pos{% else %}kpi-neg{% endif %}">{{ system_uptime|default:"0" }}</span>
+        </td>
+        <td>
+          <span class="kpi-k">MT5 Settings</span>
+          <span class="kpi-v {% if mt5_settings_count and mt5_settings_count > 0 %}kpi-pos{% else %}kpi-neg{% endif %}">{{ mt5_settings_count|default:"0" }}</span>
+        </td>
+        <td>
+          <span class="kpi-k">Active Connections</span>
+          <span class="kpi-v {% if active_connections and active_connections > 0 %}kpi-pos{% else %}kpi-neg{% endif %}">{% if active_connections %}{{ active_connections }}{% else %}0{% endif %}</span>
+        </td>
+        <td>
+          <span class="kpi-k">Uptime (24h)</span>
+          <span class="kpi-v {% if uptime_24h and uptime_24h != '0%' %}kpi-pos{% else %}kpi-neg{% endif %}">{{ uptime_24h|default:'-' }}</span>
+        </td>
+      </tr>
     </table>
+  </div>
 </div>
+
+<div class="card card-flat">
+  <div class="card-header" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+    <h3 class="page-title-pro" style="margin:0;">MT5 Monitoring Service</h3>
+    <div>
+      <button id="startMonitoringBtn" class="btn btn-pro" onclick="startMonitoring()" style="display:none;">Start</button>
+      <button id="stopMonitoringBtn" class="btn btn-pro" onclick="stopMonitoring()" style="display:none;">Stop</button>
+      <button class="btn btn-secondary" onclick="refreshMonitoringStatus()">Refresh</button>
+    </div>
+  </div>
+  <div style="padding: 1rem 1.5rem;">
+    <div class="kpi-table-wrap">
+      <table class="kpi-table">
+        <tr>
+          <td><span class="kpi-k">Service Status</span><span id="monitoringStatus" class="kpi-v" style="color:#6c757d;">Loading...</span></td>
+          <td><span class="kpi-k">Uptime (24h)</span><span id="mt5Uptime24h" class="kpi-v">-</span></td>
+          <td><span class="kpi-k">Auto-Reconnect</span><span id="autoReconnectStatus" class="kpi-v">-</span></td>
+          <td><span class="kpi-k">Max Reconnect Attempts</span><span id="maxReconnectAttempts" class="kpi-v">-</span></td>
+        </tr>
+      </table>
+    </div>
+    <div class="table-pro">
+      <table class="table">
+        <thead>
+          <tr style="background:#f8f9fa;">
+            <th style="width:40%; text-align:left;">Account</th>
+            <th style="width:30%; text-align:left;">Balance</th>
+            <th style="width:30%; text-align:left;">Equity</th>
+          </tr>
+        </thead>
+        <tbody id="mt5AccountsBody">
+          <tr><td colspan="3" style="text-align:center; color:#6c757d;">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card card-flat">
+  <div class="card-header" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+    <h3 class="page-title-pro" style="margin:0;">Data Ingestion Service</h3>
+    <div>
+      <button id="startIngestionBtn" class="btn btn-pro" onclick="startIngestion()">Start</button>
+      <button id="stopIngestionBtn" class="btn btn-pro" onclick="stopIngestion()">Stop</button>
+      <button class="btn btn-secondary" onclick="refreshIngestionStatus()">Refresh</button>
+      <button class="btn btn-secondary" onclick="openIngestionLogs()">Logs</button>
+    </div>
+  </div>
+  <div style="padding: 1rem 1.5rem;">
+    <div class="kpi-table-wrap">
+      <table class="kpi-table">
+        <tr>
+          <td><span class="kpi-k">Active</span><span id="ingestionActive" class="kpi-v" style="color:#6c757d;">-</span></td>
+          <td><span class="kpi-k">Last Run</span><span id="ingestionLastRun" class="kpi-v">-</span></td>
+          <td><span class="kpi-k">Files Scanned</span><span id="ingestionFilesScanned" class="kpi-v">0</span></td>
+          <td><span class="kpi-k">Files Imported</span><span id="ingestionFilesImported" class="kpi-v">0</span></td>
+          <td><span class="kpi-k">Rows Imported</span><span id="ingestionRowsImported" class="kpi-v">0</span></td>
+          <td><span class="kpi-k">Heartbeat</span><span id="ingestionHeartbeat" class="kpi-v">-</span></td>
+        </tr>
+      </table>
+    </div>
+    <div class="alert alert-warning" id="ingestionLastError" style="display:none; margin-top:.5rem;"></div>
+  </div>
+  
+  <!-- Ingestion Logs Modal -->
+  <div id="ingestionLogsModal" style="display:none; position: fixed; left:0; right:0; top:0; bottom:0; background: rgba(0,0,0,0.5); z-index: 2000;">
+    <div style="background:#fff; width:min(900px,95vw); margin:5vh auto; border-radius:8px; overflow:hidden;">
+      <div style="padding:1rem 1.5rem; border-bottom:1px solid #eee; display:flex; align-items:center; justify-content:space-between;">
+        <h4 style="margin:0;">Ingestion Logs (last 20)</h4>
+        <div>
+          <button class="btn btn-secondary" onclick="fetchIngestionLogs()">Refresh</button>
+          <button class="btn btn-secondary" onclick="closeIngestionLogs()">Close</button>
+        </div>
+      </div>
+      <div style="padding:1rem 1.5rem; max-height:70vh; overflow:auto;">
+        <table class="table" style="width:100%;">
+          <thead>
+            <tr>
+              <th style="width:22%;">Time</th>
+              <th style="width:34%;">File</th>
+              <th style="width:12%;">Action</th>
+              <th style="width:12%;">Rows</th>
+              <th style="width:20%;">Message</th>
+            </tr>
+          </thead>
+          <tbody id="ingestionLogsBody">
+            <tr><td colspan="5" style="text-align:center; color:#6c757d;">No data</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function getCookie(name){let v=null;if(document.cookie&&document.cookie!==''){const cs=document.cookie.split(';');for(let i=0;i<cs.length;i++){const c=cs[i].trim();if(c.substring(0,name.length+1)===(name+'=')){v=decodeURIComponent(c.substring(name.length+1));break;}}}return v;}
+function refreshMonitoringStatus(){fetch('/api/monitoring/status/').then(r=>r.json()).then(d=>{const s=document.getElementById('monitoringStatus');const a=document.getElementById('autoReconnectStatus');const up=document.getElementById('mt5Uptime24h');const m=document.getElementById('maxReconnectAttempts');const startBtn=document.getElementById('startMonitoringBtn');const stopBtn=document.getElementById('stopMonitoringBtn');if(!s||!startBtn||!stopBtn)return;if(d&&d.success&&d.monitoring_active){s.innerHTML='Running';s.style.color='#28a745';startBtn.style.display='none';stopBtn.style.display='inline-block';}else{s.innerHTML='Stopped';s.style.color='#dc3545';startBtn.style.display='inline-block';stopBtn.style.display='none';}if(up){ up.innerHTML = (d && d.uptime_24h_pct != null) ? (d.uptime_24h_pct + '%') : '-'; up.className = 'kpi-v ' + ((d && d.uptime_24h_pct && d.uptime_24h_pct>0)?'kpi-pos':'kpi-neg'); } if(a)a.innerHTML=d.auto_reconnect_enabled?'Enabled':'Disabled'; if(m)m.innerHTML=d.max_reconnect_attempts||'-';}).catch(()=>{});} 
+function startMonitoring(){const b=document.getElementById('startMonitoringBtn');if(b){b.disabled=true;b.innerHTML='Starting...';}fetch('/api/monitoring/start/',{method:'POST',headers:{'X-CSRFToken':getCookie('csrftoken'),'Content-Type':'application/json'}}).then(r=>r.json()).then(()=>refreshMonitoringStatus()).finally(()=>{if(b){b.disabled=false;b.innerHTML='Start';}});} 
+function stopMonitoring(){const b=document.getElementById('stopMonitoringBtn');if(b){b.disabled=true;b.innerHTML='Stopping...';}fetch('/api/monitoring/stop/',{method:'POST',headers:{'X-CSRFToken':getCookie('csrftoken'),'Content-Type':'application/json'}}).then(r=>r.json()).then(()=>refreshMonitoringStatus()).finally(()=>{if(b){b.disabled=false;b.innerHTML='Stop';}});} 
+function refreshIngestionStatus(){fetch('/api/ingestion/status/',{credentials:'same-origin'}).then(r=>r.json()).then(d=>{if(!d||!d.success)return;const a=document.getElementById('ingestionActive');if(a){a.textContent=d.active?'ON':'OFF';a.style.color=d.active?'#28a745':'#dc3545';}const setT=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val;};setT('ingestionLastRun',d.last_run?new Date(d.last_run).toLocaleString():'-');setT('ingestionFilesScanned',d.files_scanned!=null?d.files_scanned:0);setT('ingestionFilesImported',d.files_imported!=null?d.files_imported:0);setT('ingestionRowsImported',d.rows_imported!=null?d.rows_imported:0);const hb=document.getElementById('ingestionHeartbeat');if(hb){let ok=false;if(d.last_run){const last=Date.parse(d.last_run);const now=Date.now();const interval=(d.scan_interval||5)*1000;ok=(now-last)<=2*interval;}hb.textContent=ok?'OK':'STALE';hb.style.color=ok?'#28a745':'#dc3545';}const err=document.getElementById('ingestionLastError');if(err){if(d.last_error){err.style.display='block';err.textContent='Last error: '+d.last_error;}else{err.style.display='none';err.textContent='';}}}).catch(()=>{});} 
+function startIngestion(){fetch('/api/ingestion/start/',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest','X-CSRFToken':getCookie('csrftoken')}}).then(refreshIngestionStatus);} 
+function stopIngestion(){fetch('/api/ingestion/stop/',{method:'POST',credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest','X-CSRFToken':getCookie('csrftoken')}}).then(refreshIngestionStatus);} 
+function openIngestionLogs(){const m=document.getElementById('ingestionLogsModal');if(m){m.style.display='block';fetchIngestionLogs();}} 
+function closeIngestionLogs(){const m=document.getElementById('ingestionLogsModal');if(m){m.style.display='none';}} 
+function fetchIngestionLogs(){const tbody=document.getElementById('ingestionLogsBody');if(!tbody)return;tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#6c757d;">Loading...</td></tr>';fetch('/api/ingestion/logs/',{credentials:'same-origin'}).then(r=>r.json()).then(res=>{if(!res||!res.success){tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#dc3545;">Failed to load logs</td></tr>';return;}const rows=res.logs||[];if(!rows.length){tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#6c757d;">No logs</td></tr>';return;}tbody.innerHTML=rows.map(l=>{const dt=l.created_at?new Date(l.created_at).toLocaleString():'-';const msg=(l.message||'').replace(/</g,'&lt;');return '<tr>'+'<td>'+dt+'</td>'+'<td title="'+(l.filename||'')+'">'+(l.filename||'')+'</td>'+'<td>'+(l.action||'')+'</td>'+'<td>'+(l.rows_imported!=null?l.rows_imported:0)+'</td>'+'<td>'+msg+'</td>'+'</tr>';}).join('');}).catch(()=>{tbody.innerHTML='<tr><td colspan="5" style="text-align:center; color:#dc3545;">Failed to load logs</td></tr>';});} 
+function refreshMt5Accounts(){
+  const body=document.getElementById('mt5AccountsBody');
+  if(!body) return;
+  fetch('{% url "main:mt5_status_api" %}')
+    .then(r=>r.json())
+    .then(d=>{
+      if(!d||!d.success){ body.innerHTML='<tr><td colspan="3" style="text-align:center; color:#dc3545;">Failed to load accounts</td></tr>'; return; }
+      const conns=(d.connections||[]).filter(c=>c.is_connected);
+      if(!conns.length){ body.innerHTML='<tr><td colspan="3" style="text-align:center; color:#6c757d;">No connected MT5 accounts</td></tr>'; return; }
+      const fmt=v=> (v==null? '-' : ('$'+Number(v).toFixed(2)));
+      body.innerHTML = conns.map(c=>{
+        const label = (c.name? c.name : (c.server||'Account')) + (c.login? ' ('+c.login+')':'');
+        return '<tr>'+
+          '<td>'+label+'</td>'+
+          '<td>'+fmt(c.balance)+'</td>'+
+          '<td>'+fmt(c.equity)+'</td>'+
+        '</tr>';
+      }).join('');
+    })
+    .catch(()=>{ body.innerHTML='<tr><td colspan="3" style="text-align:center; color:#dc3545;">Failed to load accounts</td></tr>'; });
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  refreshMonitoringStatus();
+  refreshIngestionStatus();
+  refreshMt5Accounts();
+  setInterval(refreshIngestionStatus,5000);
+  setInterval(refreshMt5Accounts,5000);
+});
+</script>
 {% endblock %}

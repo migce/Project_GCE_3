@@ -20,16 +20,12 @@ urlpatterns = [
     path('api/mt5/trade/sell', views.mt5_trade_sell, name='mt5_trade_sell'),
     path('api/mt5/trade/close_all', views.mt5_close_all, name='mt5_close_all'),
     path('api/mt5/trade/close_position', views.mt5_close_position, name='mt5_close_position'),
-    path('system-dashboard/', views.system_dashboard, name='system_dashboard'),
-    path('raw-signals/', views.raw_signals_overview, name='raw_signals'),
     path('api/mt5/connect/', views.connect_mt5, name='mt5_connect'),
     path('api/mt5/disconnect/', views.disconnect_mt5, name='mt5_disconnect'),
     path('api/mt5/status/', views.mt5_status_api, name='mt5_status_api'),
     path('api/monitoring/status/', views.get_monitoring_status_api, name='monitoring_status'),
     path('api/monitoring/start/', views.start_monitoring_service, name='start_monitoring'),
     path('api/monitoring/stop/', views.stop_monitoring_service, name='stop_monitoring'),
-    path('api/csv/files/', views.get_csv_files_api, name='csv_files_api'),
-    path('api/csv/data/', views.get_csv_data_api, name='csv_data_api'),
     
     # Data ingestion API
     path('api/ingestion/status/', views.ingestion_status_api, name='ingestion_status'),

@@ -32,8 +32,8 @@ from django.views.decorators.http import require_http_methods
 # Create your views here.
 
 def home(request):
-    """Главная страница проекта GCE_3"""
-    
+    """Главная страница проекта GCE_3 (основные метрики системы)."""
+
     # Проверяем доступность MT5
     mt5_available = False
     try:
@@ -41,15 +41,42 @@ def home(request):
         mt5_available = True
     except ImportError:
         mt5_available = False
-    
-    # Получаем статистику MT5
+
+    # Количество настроек MT5
     mt5_settings_count = MT5ConnectionSettings.objects.count()
-    
+
+    # Активные подключения (по времени последнего обновления)
+    active_connections = 0
+    try:
+        active_connections = sum(
+            1
+            for s in MT5ConnectionSettings.objects.all()
+            if (s.last_connection_time and (timezone.now() - s.last_connection_time).total_seconds() < 300)
+        )
+    except Exception:
+        active_connections = 0
+
+    # Заглушка uptime (если нет отдельного источника)
+    system_uptime = "99.9%"
+
+    # Uptime за 24 часа (приблизительная оценка по активности ingestion за сутки)
+    uptime_24h = None
+    try:
+        st = DataIngestionStatus.get()
+        if st and st.last_run:
+            delta = (timezone.now() - st.last_run).total_seconds()
+            uptime_24h = "100%" if delta <= 24*3600 else "0%"
+    except Exception:
+        uptime_24h = None
+
     context = {
         'mt5_available': mt5_available,
         'mt5_settings_count': mt5_settings_count,
+        'active_connections': active_connections,
+        'system_uptime': system_uptime,
+        'uptime_24h': uptime_24h,
     }
-    
+
     return render(request, 'main/home.html', context)
 
 def trading_history(request):
@@ -643,11 +670,46 @@ def get_monitoring_status_api(request):
     """API endpoint to get current monitoring service status"""
     try:
         from .services.mt5_monitor import get_monitor
-        from .models import MT5MonitoringSettings
+        from .models import MT5MonitoringSettings, MT5ConnectionSettings, MT5ConnectionHealth
+        from django.utils import timezone as dj_tz
+        from datetime import timedelta as dt_timedelta
         
         monitor = get_monitor()
         monitoring_settings = MT5MonitoringSettings.get_settings()
         
+        # Compute MT5 uptime over last 24h (average across connections)
+        uptime_pct = None
+        try:
+            cutoff = dj_tz.now() - dt_timedelta(hours=24)
+            conns = list(MT5ConnectionSettings.objects.all())
+            if conns:
+                total_frac = 0.0
+                counted = 0
+                now_ts = dj_tz.now()
+                window_sec = (now_ts - cutoff).total_seconds() or 1.0
+                for s in conns:
+                    recs = list(MT5ConnectionHealth.objects.filter(settings=s, check_time__gte=cutoff).order_by('check_time'))
+                    prev_rec = MT5ConnectionHealth.objects.filter(settings=s, check_time__lt=cutoff).order_by('-check_time').first()
+                    prev_state = bool(prev_rec.is_connected) if prev_rec else False
+                    prev_time = cutoff
+                    connected = 0.0
+                    for r in recs:
+                        dt = (r.check_time - prev_time).total_seconds()
+                        if dt > 0 and prev_state:
+                            connected += dt
+                        prev_state = bool(r.is_connected)
+                        prev_time = r.check_time
+                    tail = (now_ts - prev_time).total_seconds()
+                    if tail > 0 and prev_state:
+                        connected += tail
+                    frac = max(0.0, min(1.0, connected / window_sec))
+                    total_frac += frac
+                    counted += 1
+                if counted:
+                    uptime_pct = int(round((total_frac / counted) * 100))
+        except Exception:
+            uptime_pct = None
+
         return JsonResponse({
             'success': True,
             'monitoring_active': monitor.monitoring_active,
@@ -655,7 +717,8 @@ def get_monitoring_status_api(request):
             'auto_reconnect_enabled': monitoring_settings.auto_reconnect_enabled,
             'health_check_interval': monitoring_settings.health_check_interval,
             'reconnect_interval': monitoring_settings.reconnect_interval,
-            'max_reconnect_attempts': monitoring_settings.max_reconnect_attempts
+            'max_reconnect_attempts': monitoring_settings.max_reconnect_attempts,
+            'uptime_24h_pct': uptime_pct,
         })
         
     except Exception as e:
@@ -665,7 +728,7 @@ def get_monitoring_status_api(request):
         })
 
 
-def raw_signals(request):
+def __removed_raw_signals(request):
     """Raw Signals page for displaying TradeStation CSV exports"""
     
     # TradeStation exports directory (from settings)
@@ -680,10 +743,10 @@ def raw_signals(request):
         'trading_systems_count': trading_systems_count
     }
     
-    return render(request, 'main/raw_signals.html', context)
+    return JsonResponse({'success': False, 'message': 'Removed'})
 
 
-def get_csv_files_api(request):
+def __removed_get_csv_files_api(request):
     """API endpoint to get list of CSV files from TradeStation exports directory"""
     try:
         ts_exports_dir = getattr(django_settings, 'TS_EXPORTS_DIR', r'C:\\TS_EXPORTS')
@@ -720,11 +783,7 @@ def get_csv_files_api(request):
         # Sort by modification time (newest first)
         csv_files.sort(key=lambda x: x['modified'], reverse=True)
         
-        return JsonResponse({
-            'success': True,
-            'files': csv_files,
-            'count': len(csv_files)
-        })
+        return JsonResponse({'success': False, 'message': 'Removed'})
         
     except Exception as e:
         return JsonResponse({
@@ -734,7 +793,7 @@ def get_csv_files_api(request):
         })
 
 
-def get_csv_data_api(request):
+def __removed_get_csv_data_api(request):
     """API endpoint to get data from specific CSV file"""
     try:
         filename = request.GET.get('filename')
@@ -795,15 +854,7 @@ def get_csv_data_api(request):
                     data.append(row)
                     row_count += 1
         
-        return JsonResponse({
-            'success': True,
-            'filename': filename,
-            'headers': headers,
-            'data': data,
-            'row_count': len(data),
-            'total_rows': row_count,
-            'delimiter': delimiter
-        })
+        return JsonResponse({'success': False, 'message': 'Removed'})
         
     except Exception as e:
         return JsonResponse({
@@ -1280,78 +1331,7 @@ def start_ingestion_service(request):
     return JsonResponse({'success': False, 'message': 'Only POST allowed'})
 
 
-def raw_signals_overview(request):
-    """Raw Signals: compact per-system overview with last bar timestamps per TF."""
-    systems_qs = TradingSystem.objects.all().prefetch_related('timeframes')
-    # Compute last_dt per TF via TF Binding -> MarketBar
-    last_by_tf = {}
-    for sys in systems_qs:
-        for tf in sys.timeframes.all():
-            try:
-                bind = TradingSystemTFBinding.objects.filter(trading_system=sys, level=getattr(tf, 'level', None)).select_related('feed').first()
-                if bind:
-                    last = MarketBar.objects.filter(feed=bind.feed).order_by('-dt').values_list('dt', flat=True).first()
-                    if last:
-                        last_by_tf[tf.id] = last
-            except Exception:
-                continue
-
-    systems = []
-    for sys in systems_qs:
-        tfs = list(sys.timeframes.all())
-        tf_infos = []
-        for tf in tfs:
-            tf_infos.append({
-                'id': tf.id,
-                'timeframe': getattr(tf, 'timeframe', None),
-                'level': getattr(tf, 'level', None),
-                'last_dt': last_by_tf.get(tf.id),
-                'last_server_dt': last_by_tf.get(tf.id),
-            })
-
-        # Build recent signals (last 10) with Close and PnL in pips
-        signals_rows = []
-        total_pips = 0.0
-        try:
-            base_level = getattr(sys.signal_settings, 'signal_base_tf_level', None) or 1
-        except Exception:
-            base_level = 1
-        base_tf = next((x for x in tfs if getattr(x, 'level', None) == base_level), None)
-        evs = list(SignalEvent.objects.filter(trading_system=sys, level=base_level, action='OPEN').order_by('-event_time')[:11])
-
-        def get_close(ev):
-            return _get_close_for_event(ev)
-
-        pip_scale = 100 if 'JPY' in (sys.symbol or '').upper() else 10000
-        # We show PnL on the previous (older) signal row, because the trade is closed at the current signal.
-        # evs is newest->oldest; for row i>0 we compute PnL between evs[i] (older, opened here) and evs[i-1] (newer, closed here).
-        for i, ev in enumerate(evs[:10]):
-                close_cur = get_close(ev)
-                pnl = None
-                if i > 0:
-                    newer = evs[i - 1]
-                    close_newer = get_close(newer)
-                    if close_cur is not None and close_newer is not None:
-                        pnl = (close_newer - close_cur) * pip_scale if ev.direction == 'BUY' else (close_cur - close_newer) * pip_scale
-                        total_pips += pnl
-                signals_rows.append({
-                    'time': ev.event_time,
-                    'direction': ev.direction,
-                    'close': close_cur,
-                    'pips': pnl,
-                })
-
-        systems.append({
-            'id': sys.id,
-            'system_sid': sys.system_sid,
-            'symbol': sys.symbol,
-            'timeframes_count': getattr(sys, 'timeframes_count', len(tfs)),
-            'timeframes': tf_infos,
-            'signals': signals_rows,
-            'signals_total_pips': total_pips,
-        })
-
-    return render(request, 'main/raw_signals.html', {'systems': systems})
+ 
 
 
 def stop_ingestion_service(request):
