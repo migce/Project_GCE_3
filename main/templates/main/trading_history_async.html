@@ -1,0 +1,520 @@
+{% extends 'main/base.html' %}
+
+{% block title %}Trading History (Async) - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header" style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+    <div>
+      <h2 class="card-title" style="margin:0;">Trading History (Async)</h2>
+      <p class="card-subtitle" style="margin:0;">Run simulation in background with progress</p>
+    </div>
+    <div>
+      <button type="button" id="runBtn" class="btn btn-primary run-btn" onclick="startSim(event)" title="Run simulation">
+        <span id="runProgressFill" class="run-progress"></span>
+        <span id="runLabel">Run</span>
+      </button>
+    </div>
+  </div>
+  <div style="padding:1rem;">
+    <form id="simForm" onsubmit="return startSim(event)">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem;">
+        <div>
+          <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Trading System</label>
+          <select name="system" id="fSystem" class="form-pro-control">
+            {% for s in systems %}
+              <option value="{{ s.id }}" data-symbol="{{ s.symbol }}" data-spread="{{ s.spread_pips|default_if_none:0 }}">{{ s.system_sid }} ({{ s.symbol }})</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Base TF Level</label>
+          <input type="number" id="fTf" name="tf" value="1" min="1" step="1" class="form-pro-control" />
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Spread (pips)</label>
+          <input type="number" id="fSpread" name="spread" value="0" step="0.01" class="form-pro-control" />
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Lot Size</label>
+          <input type="number" id="fLot" name="lot" value="0.01" step="0.01" class="form-pro-control" />
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Start Balance ($)</label>
+          <input type="number" id="fBalance" name="balance" value="10000" step="0.01" class="form-pro-control" />
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:0.25rem; font-weight:500;">Tick Size / $ per Tick</label>
+          <input type="text" id="fTickInfo" value="-" class="form-pro-control" readonly />
+        </div>
+      </div>
+    </form>
+
+    <div id="progressMsg" style="margin-top:0.5rem; color:#6c757d; display:none;">Preparing…</div>
+
+    <div id="result" style="margin-top:1.5rem;"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  function getCookie(name){
+    var cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+      var cookies = document.cookie.split(';');
+      for (var i = 0; i < cookies.length; i++) {
+        var cookie = cookies[i].trim();
+        if (cookie.substring(0, name.length + 1) === (name + '=')) {
+          cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+          break;
+        }
+      }
+    }
+    return cookieValue;
+  }
+  let jobId = null;
+  let timer = null;
+  function qs(id){ return document.getElementById(id); }
+
+  function setRunning(running){
+    var form = qs('simForm');
+    Array.from(form.elements||[]).forEach(function(el){ if(el && el.name) el.disabled = !!running; });
+    var msg = qs('progressMsg');
+    msg.style.display = running? 'block':'none';
+    var btn = document.getElementById('runBtn');
+    if(btn){ btn.disabled = !!running; }
+  }
+  function setRunProgress(pct, label){
+    var fill = document.getElementById('runProgressFill');
+    if(fill){ fill.style.width = Math.max(0, Math.min(100, (pct||0))) + '%'; }
+    if(label){ var lbl = document.getElementById('runLabel'); if(lbl) lbl.textContent = label; }
+  }
+
+  window.startSim = function(ev){
+    if(ev) ev.preventDefault();
+    if(timer){ clearInterval(timer); timer = null; }
+    qs('result').innerHTML = '';
+    const fd = new FormData(qs('simForm'));
+    // Explicitly pass selected symbol (option data-symbol) to backend
+    try{
+      var sel = document.getElementById('fSystem');
+      var opt = sel ? sel.options[sel.selectedIndex] : null;
+      var sym = opt ? (opt.getAttribute('data-symbol')||'') : '';
+      if(sym){ fd.set('symbol', sym); }
+    }catch(e){}
+    setRunProgress(5, 'Starting…');
+    setRunning(true);
+    qs('progressMsg').textContent = 'Starting…';
+    fetch('{% url "main:api_ts_sim_start" %}', {method:'POST', body:fd, headers:{'X-CSRFToken': getCookie('csrftoken'), 'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+      .then(r=>r.json()).then(d=>{
+        if(!d.success){ throw new Error(d.message||'Failed to start'); }
+        jobId = d.job_id;
+        poll();
+        timer = setInterval(poll, 600);
+      }).catch(err=>{
+        qs('progressMsg').textContent = 'Error: '+(err && err.message ? err.message : String(err));
+        setRunProgress(0, 'Run');
+        setRunning(false);
+        qs('progressMsg').style.display = 'block';
+        console.error('TS sim start error', err);
+      });
+    return false;
+  };
+
+  function poll(){
+    if(!jobId){ return; }
+    fetch('{% url "main:api_ts_sim_status" %}?job_id='+encodeURIComponent(jobId), {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+      .then(r=>r.json()).then(d=>{
+        if(!d.success){ throw new Error(d.message||'status failed'); }
+        setRunProgress(d.progress||0, d.status==='done'? 'Completed' : 'Running…');
+        qs('progressMsg').textContent = (d.message||d.status||'Running…');
+        if(d.status==='done'){
+          clearInterval(timer); timer=null;
+          fetch('{% url "main:api_ts_sim_result" %}?job_id='+encodeURIComponent(jobId), {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+            .then(r=>r.json()).then(showResult)
+            .catch(err=>{ qs('progressMsg').textContent = 'Error: '+err.message; });
+        }
+      }).catch(err=>{
+        clearInterval(timer); timer = null;
+        qs('progressMsg').textContent = 'Error: '+(err && err.message ? err.message : String(err));
+        setRunProgress(0, 'Run');
+        setRunning(false);
+        qs('progressMsg').style.display = 'block';
+        console.error('TS sim status error', err);
+      });
+  }
+
+  function fmtDur(seconds){
+    var s = Math.floor(seconds||0); var d=Math.floor(s/86400); s%=86400; var h=Math.floor(s/3600); s%=3600; var m=Math.floor(s/60);
+    return d>0? (d+'d '+String(h).padStart(2,'0')+'h') : (h>0? (h+'h '+String(m).padStart(2,'0')+'m') : (m+'m'));
+  }
+
+  function showResult(res){
+    if(!res || !res.success){ qs('progressMsg').textContent = 'Failed to get result'; return; }
+    setRunProgress(100, 'Completed');
+    qs('progressMsg').textContent = 'Completed';
+    const r = res.result || {};
+    const kp = document.createElement('div');
+    kp.innerHTML = `
+      <div class="kpi-table-wrap">
+        <div class="text-subtle" style="margin:4px 0 8px 0; color:#6c757d;">
+          Data Range (events): ${r.events_from_dt? new Date(r.events_from_dt).toLocaleString(): '-'} → ${r.events_to_dt? new Date(r.events_to_dt).toLocaleString(): '-'}
+          ${' | Events: ' + (r.events_count||0)}
+          ${r.bars_from_dt? ' | Bars: ' + new Date(r.bars_from_dt).toLocaleString() + ' → ' + new Date(r.bars_to_dt).toLocaleString() : ''}
+          ${r.price_chart && r.price_chart.n ? ' (' + r.price_chart.n + ')' : ''}
+        </div>
+        <div class="tabs"><button class="tab active" data-tab="ov">Overview</button><button class="tab" data-tab="cycles">Cycles</button></div>
+        <table class="kpi-table">
+          <tr class="kpi-section pane-ov"><th colspan="4">Overview</th></tr>
+          <tr class="pane-ov">
+            <td><span class="kpi-k">Base TF</span><span class="kpi-v">L${r.base_level||1}</span></td>
+            <td><span class="kpi-k">Total Trades</span><span class="kpi-v">${(r.total_trades||0).toLocaleString()}</span></td>
+            <td><span class="kpi-k">Win Rate</span><span class="kpi-v">${(r.win_rate||0).toFixed(1)}%</span></td>
+            <td><span class="kpi-k">Cycles</span><span class="kpi-v">${(r.cycles_buy||0)+(r.cycles_sell||0)} (B ${r.cycles_buy||0}, S ${r.cycles_sell||0})</span></td>
+          </tr>
+
+          <tr class="kpi-section pane-ov"><th colspan="4">PnL Snapshot</th></tr>
+          <tr class="pane-ov">
+            <td><span class="kpi-k">Total PnL (pips)</span><span class="kpi-v">${(r.total_pips||0).toFixed(1)}</span><span class="kpi-sub ${(r.kpi_pnl_vs_bh||0)>0?'kpi-pos':((r.kpi_pnl_vs_bh||0)<0?'kpi-neg':'')}">vs B&H: ${(r.kpi_pnl_vs_bh||0).toFixed(1)}${r.kpi_pnl_vs_bh_pct!=null? ' ('+r.kpi_pnl_vs_bh_pct.toFixed(1)+'%)':''}</span></td>
+            <td><span class="kpi-k">Buy & Hold (pips)</span><span class="kpi-v">${(r.kpi_buy_hold||0).toFixed(1)}</span></td>
+            <td><span class="kpi-k">Short & Hold (pips)</span><span class="kpi-v">${(r.kpi_short_hold||0).toFixed(1)}</span></td>
+            <td><span class="kpi-k">Expectancy (pips)</span><span class="kpi-v">${(r.kpi_expectancy||0).toFixed(1)}</span></td>
+          </tr>
+
+          <tr class="pane-ov">
+            <td><span class="kpi-k">Total PnL ($)</span><span class="kpi-v ${((r.kpi_profit_usd||0)>=0)?'kpi-pos':'kpi-neg'}">${(r.kpi_profit_usd||0).toFixed(2)}</span></td>
+            <td><span class="kpi-k">End Balance ($)</span><span class="kpi-v ${((r.kpi_end_balance||0) >= (r.start_balance||10000))?'kpi-pos':'kpi-neg'}">${(r.kpi_end_balance||0).toFixed(2)}</span></td>
+            <td><span class="kpi-k">Min Equity ($)</span><span class="kpi-v">${(r.kpi_min_equity||0).toFixed(2)}</span></td>
+            <td><span class="kpi-k">Return (%)</span><span class="kpi-v">${(r.kpi_return_pct||0).toFixed(2)}%</span></td>
+          </tr>
+
+          <tr class="kpi-section pane-cycles"><th colspan="4">Cycle Performance</th></tr>
+          <tr class="pane-cycles">
+            <td><span class="kpi-k">Cycle Profit (avg/max)</span><span class="kpi-v">${(r.kpi_cycle_profit_avg||0).toFixed(1)} / ${(r.kpi_cycle_profit_max||0).toFixed(1)}</span></td>
+            <td><span class="kpi-k">Cycle Loss (avg/max)</span><span class="kpi-v">${(r.kpi_cycle_loss_avg||0).toFixed(1)} / ${(r.kpi_cycle_loss_max||0).toFixed(1)}</span></td>
+            <td><span class="kpi-k">Profit Factor</span><span class="kpi-v">${r.kpi_profit_factor!=null? r.kpi_profit_factor.toFixed(2): '-'}</span></td>
+            <td><span class="kpi-k">Payoff Ratio</span><span class="kpi-v">${r.kpi_payoff!=null? r.kpi_payoff.toFixed(2): '-'}</span></td>
+          </tr>
+          <tr class="pane-cycles">
+            <td><span class="kpi-k">Trades per Cycle (avg/max)</span><span class="kpi-v">${(r.kpi_trades_per_cycle_avg||0).toFixed(1)} / ${(r.kpi_trades_per_cycle_max||0)}</span></td>
+            <td></td><td></td><td></td>
+          </tr>
+
+          <tr class="pane-cycles">
+            <td colspan="4" class="kpi-spark">
+              <div class="kpi-inline-dist">
+                <div>
+                  <span class="kpi-k">Cycles distribution (#trades → cycles)</span>
+                  <span class="kpi-v">
+                    ${(r.kpi_cycle_dist||[]).length? r.kpi_cycle_dist.map(function(p,i){return (i? ' • ':'') + p[0] + '→' + p[1];}).join('') : '-'}
+                  </span>
+                </div>
+                ${ (r.kpi_cycle_dist||[]).length ? (`
+                <div class="spark-bars">
+                  ${r.kpi_cycle_dist.map(function(p){ var cnt=p[0], qty=p[1]; var h = (r.kpi_cycle_dist_max? Math.round(qty / r.kpi_cycle_dist_max * 30) : 0); return `<div class="bwrap" title="${cnt} trades: ${qty} cycles"><div class="bar" style="height:${h}px"></div><div class="lbl">${cnt}</div></div>`; }).join('')}
+                </div>
+                `) : ''}
+              </div>
+            </td>
+          </tr>
+          <tr class="pane-cycles">
+            <td colspan="4" class="kpi-spark">
+              <div class="kpi-inline-dist">
+                <div>
+                  <span class="kpi-k">Profit by trades per cycle (sum pips)</span>
+                  <span class="kpi-v">
+                    ${(r.kpi_profit_by_count||[]).length? r.kpi_profit_by_count.map(function(it,i){return (i? ' • ':'') + `<span class="${it.pos? 'kpi-pos': (it.neg? 'kpi-neg': '')}">${it.count}→${it.sum.toFixed(1)}</span>`;}).join('') : '-'}
+                  </span>
+                </div>
+                ${ (r.kpi_profit_by_count||[]).length ? (`
+                <div class="spark-bars">
+                  ${r.kpi_profit_by_count.map(function(it){ var h = (r.kpi_profit_by_count_max_abs? Math.round(Math.abs(it.abs)/r.kpi_profit_by_count_max_abs*30):0); return `<div class="bwrap" title="${it.count} trades: ${it.sum.toFixed(1)} pips"><div class="bar ${it.pos? 'pos': (it.neg? 'neg':'')}" style="height:${h}px"></div><div class="lbl">${it.count}</div></div>`; }).join('')}
+                </div>
+                `) : ''}
+              </div>
+            </td>
+          </tr>
+
+          <tr class="kpi-section pane-ov"><th colspan="4">Risk & Duration</th></tr>
+          <tr class="pane-ov">
+            <td><span class="kpi-k">Expectancy (pips)</span><span class="kpi-v">${(r.kpi_expectancy||0).toFixed(1)}</span></td>
+            <td><span class="kpi-k">Max Drawdown (pips)</span><span class="kpi-v">${(r.kpi_max_dd||0).toFixed(1)}</span></td>
+            <td><span class="kpi-k">Avg Duration</span><span class="kpi-v">${fmtDur(r.kpi_avg_duration_sec||0)}</span></td>
+            <td><span class="kpi-k">Streaks (W/L)</span><span class="kpi-v">${(r.kpi_streaks && r.kpi_streaks.win)||0}/${(r.kpi_streaks && r.kpi_streaks.loss)||0}</span></td>
+          </tr>
+
+          <tr class="kpi-section pane-ov"><th colspan="4">Mix & Trends</th></tr>
+          <tr class="pane-ov">
+            <td><span class="kpi-k">Direction Mix</span><span class="kpi-v">BUY ${(r.kpi_dir_mix&&r.kpi_dir_mix.buy_pct||0).toFixed(0)}% / SELL ${(r.kpi_dir_mix&&r.kpi_dir_mix.sell_pct||0).toFixed(0)}%</span></td>
+            <td class="kpi-spark">
+              <span class="kpi-k">Cum PnL (All)</span>
+              <svg width="${r.spark_overall.w}" height="${r.spark_overall.h}" class="spark">
+                <line x1="0" y1="${r.spark_overall.zero_y}" x2="${r.spark_overall.w}" y2="${r.spark_overall.zero_y}" class="spark-zero"/>
+                <path d="${r.spark_overall.path}" class="spark-line all"/>
+              </svg>
+            </td>
+            <td class="kpi-spark">
+              <span class="kpi-k">Cum PnL (Buy)</span>
+              <svg width="${r.spark_buy.w}" height="${r.spark_buy.h}" class="spark">
+                <line x1="0" y1="${r.spark_buy.zero_y}" x2="${r.spark_buy.w}" y2="${r.spark_buy.zero_y}" class="spark-zero"/>
+                <path d="${r.spark_buy.path}" class="spark-line buy"/>
+              </svg>
+            </td>
+            <td class="kpi-spark">
+              <span class="kpi-k">Cum PnL (Sell)</span>
+              <svg width="${r.spark_sell.w}" height="${r.spark_sell.h}" class="spark">
+                <line x1="0" y1="${r.spark_sell.zero_y}" x2="${r.spark_sell.w}" y2="${r.spark_sell.zero_y}" class="spark-zero"/>
+                <path d="${r.spark_sell.path}" class="spark-line sell"/>
+              </svg>
+            </td>
+          </tr>
+        </table>
+      </div>`;
+    // Tabs behaviour: toggle row groups
+    (function(){
+      const tabs = kp.querySelectorAll('.tabs .tab');
+      const setTab = function(which){
+        tabs.forEach(btn=>btn.classList.toggle('active', btn.dataset.tab===which));
+        const isCycles = (which === 'cycles');
+        kp.querySelectorAll('tr.pane-ov').forEach(tr=>{ tr.style.display = isCycles? 'none':'table-row'; });
+        kp.querySelectorAll('tr.pane-cycles').forEach(tr=>{ tr.style.display = isCycles? 'table-row':'none'; });
+      };
+      tabs.forEach(btn=>btn.addEventListener('click', function(){ setTab(this.dataset.tab); }));
+      setTab('ov');
+    })();
+
+    const tbl = document.createElement('div');
+    // Price chart block (full TS-style)
+    const pc = r.price_chart;
+    if(pc && pc.n>0){
+      const chart = document.createElement('div');
+      chart.className = 'card card-flat price-chart-block';
+      const markersJson = JSON.stringify(pc.markers||[]).replaceAll('<','&lt;');
+      chart.innerHTML = `
+        <div class="rules-head">Base TF Price</div>
+        <div class="pc-legend" style="position:absolute; right:10px; top:6px; font-size:.8rem; color:#4b5563; background:rgba(255,255,255,.8); padding:2px 6px; border-radius:4px; display:none;"></div>
+        <svg class="price-svg" data-w="${pc.w}" data-h="${pc.h}" data-pad="${pc.pad}" data-pmin="${pc.pmin}" data-pmax="${pc.pmax}" data-dts="${pc.dts.join(',')}" data-highs="${pc.highs.join(',')}" data-lows="${pc.lows.join(',')}" data-opens="${pc.opens.join(',')}" data-closes="${pc.closes.join(',')}" data-n="${pc.n}" viewBox="0 0 ${pc.w} ${pc.h}" preserveAspectRatio="xMidYMid meet" width="100%" height="240">
+          <g class="bars"></g>
+          <g class="marks"></g>
+          <g class="pc-cross" style="display:none;">
+            <line class="cross-h" x1="0" y1="0" x2="${pc.w}" y2="0" />
+            <line class="cross-v" x1="0" y1="0" x2="0" y2="${pc.h}" />
+          </g>
+        </svg>
+        <div class="pc-toolbar" style="display:flex; align-items:center; justify-content:flex-end; gap:6px; margin:4px 6px 0 0;">
+          <span class="pc-bars-count" style="margin-right:auto; font-size:.78rem; color:#4b5563;">Bars: 0</span>
+          <button type="button" class="btn btn-pro pc-zoom-in" style="padding:.2rem .5rem;">+</button>
+          <button type="button" class="btn btn-pro pc-zoom-out" style="padding:.2rem .5rem;">-</button>
+          <button type="button" class="btn btn-pro pc-reset" style="padding:.2rem .5rem;" title="Reset view">Reset</button>
+        </div>
+        <input type="range" class="pc-scroll" min="0" value="0" step="1" style="width:100%; margin-top:6px;" />
+        <pre class="pc-markers-json" style="display:none;">${markersJson}</pre>
+      `;
+      kp.appendChild(chart);
+      setTimeout(function(){ initTsChart(chart); }, 0);
+    }
+    // Trades table with paging: first 10, then +50 per click
+    const allTrades = (r.trades||[]).slice().reverse(); // latest first
+    tbl.innerHTML = `
+      <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:hidden; margin-top:1rem;">
+        <table class="table">
+          <thead><tr><th>Open Time</th><th>Direction</th><th>Open</th><th>Close Time</th><th>Close</th><th>PnL (pips)</th></tr></thead>
+          <tbody id="tradesBody">${allTrades.length? '' : '<tr><td colspan="6" style="text-align:center; color:#6c757d; padding:2rem;">No trades</td></tr>'}</tbody>
+        </table>
+        <div style="padding:0.5rem; text-align:center;">
+          <button id="showMoreBtn" class="btn btn-primary" style="min-width:160px; display:${allTrades.length>10? 'inline-block':'none'};">Показать ещё</button>
+        </div>
+      </div>`;
+    const tbody = tbl.querySelector('#tradesBody');
+    let rendered = 0;
+    function renderRows(count){
+      const end = Math.min(rendered + count, allTrades.length);
+      let html = '';
+      for(let i=rendered; i<end; i++){
+        const t = allTrades[i];
+        html += `<tr>
+          <td>${t.open_time? new Date(t.open_time).toLocaleString(): '-'}</td>
+          <td>${t.open_dir||'-'}</td>
+          <td>${t.open_price!=null? Number(t.open_price).toFixed(5): '-'}</td>
+          <td>${t.close_time? new Date(t.close_time).toLocaleString(): '-'}</td>
+          <td>${t.close_price!=null? Number(t.close_price).toFixed(5): '-'}</td>
+          <td>${t.pips!=null? Number(t.pips).toFixed(1): '-'}</td>
+        </tr>`;
+      }
+      tbody.insertAdjacentHTML('beforeend', html);
+      rendered = end;
+      const moreBtn = tbl.querySelector('#showMoreBtn');
+      if(moreBtn){
+        if(rendered >= allTrades.length){ moreBtn.style.display = 'none'; }
+        else { moreBtn.textContent = 'Показать ещё'; }
+      }
+    }
+    // initial 10
+    if(allTrades.length){ renderRows(10); }
+    const moreBtn = tbl.querySelector('#showMoreBtn');
+    if(moreBtn){ moreBtn.addEventListener('click', function(){ renderRows(50); }); }
+    const cont = qs('result');
+    cont.innerHTML = '';
+    cont.appendChild(kp);
+    cont.appendChild(tbl);
+    // Update tick info field regardless of chart
+    try{
+      var tick = (r.mt5_tick_size!=null? r.mt5_tick_size : '-');
+      var usdTick = (r.mt5_usd_per_tick_lot!=null? Number(r.mt5_usd_per_tick_lot).toFixed(2) : '-');
+      var tfv = document.getElementById('fTickInfo'); if(tfv){ tfv.value = (tick+' / '+usdTick); tfv.title = (r.mt5_tick_reason||''); }
+    }catch(e){}
+    setRunning(false);
+  }
+
+  function initTsChart(container){
+    var legend = container.querySelector('.pc-legend');
+    var svg = container.querySelector('.price-svg');
+    var toolbar = container.querySelector('.pc-toolbar');
+    var scroll = container.querySelector('.pc-scroll');
+    if(!svg || !toolbar || !scroll) return;
+    var viewBox = svg.getAttribute('viewBox') || '0 0 0 0';
+    var vbParts = viewBox.split(' ');
+    var w = parseFloat(svg.dataset.w || vbParts[2] || 0);
+    var h = parseFloat(svg.dataset.h || vbParts[3] || 0);
+    var pad = parseFloat(svg.dataset.pad || 6);
+    var rawPmin = parseFloat(svg.dataset.pmin);
+    var rawPmax = parseFloat(svg.dataset.pmax);
+    var dts = (svg.dataset.dts || '').split(',');
+    function parseNumberList(str){
+      if(!str) return [];
+      var parts = str.split(',');
+      var res = new Array(parts.length);
+      for(var i=0; i<parts.length; i++){
+        var v = parseFloat(parts[i]);
+        res[i] = isFinite(v) ? v : NaN;
+      }
+      return res;
+    }
+    var highs = parseNumberList(svg.dataset.highs);
+    var lows = parseNumberList(svg.dataset.lows);
+    var opens = parseNumberList(svg.dataset.opens);
+    var closes = parseNumberList(svg.dataset.closes);
+    var n = parseInt(svg.dataset.n || '0', 10);
+    if(!n){
+      n = Math.max(highs.length, lows.length, opens.length, closes.length, 0);
+    }
+    if(!n){
+      toolbar.style.display = 'none';
+      scroll.style.display = 'none';
+      if(legend) legend.style.display = 'none';
+      return;
+    }
+    function finiteMin(arr){ var min = Infinity; for(var i=0;i<arr.length;i++){ var v=arr[i]; if(!isFinite(v)) continue; if(v<min) min=v; } return min===Infinity? NaN: min; }
+    function finiteMax(arr){ var max = -Infinity; for(var i=0;i<arr.length;i++){ var v=arr[i]; if(!isFinite(v)) continue; if(v>max) max=v; } return max===-Infinity? NaN: max; }
+    var globalMin = isFinite(rawPmin) ? rawPmin : finiteMin(lows);
+    var globalMax = isFinite(rawPmax) ? rawPmax : finiteMax(highs);
+    if(!isFinite(globalMin)) globalMin = 0; if(!isFinite(globalMax)) globalMax = globalMin + 1; if(globalMax===globalMin) globalMax = globalMin + 1;
+    var markersJsonEl = container.querySelector('.pc-markers-json');
+    var marksData = []; try{ marksData = JSON.parse(markersJsonEl.textContent || '[]'); }catch(err){ marksData = []; }
+    if(!Array.isArray(marksData)) marksData = [];
+    var marks = marksData.map(function(m){
+      var idxRaw = (m && (m.idx !== undefined ? m.idx : m.i)) || 0;
+      var idx = parseInt(idxRaw, 10);
+      var priceVal = parseFloat(m && m.price);
+      var indicators = {};
+      if(m && m.indicators && typeof m.indicators === 'object'){
+        Object.keys(m.indicators).forEach(function(key){ indicators[key] = m.indicators[key]; });
+      }
+      return { i: isFinite(idx)? idx: 0, price: isFinite(priceVal)? priceVal: NaN, klass: (m && m.klass) ? m.klass : '', type: (m && m.type) ? m.type : '', indicators: indicators };
+    });
+    var cross = svg.querySelector('.pc-cross'); var hline = cross? cross.querySelector('.cross-h'): null; var vline = cross? cross.querySelector('.cross-v'): null;
+    var barsG = svg.querySelector('g.bars'); var marksG = svg.querySelector('g.marks');
+    var counter = toolbar.querySelector('.pc-bars-count');
+    var scaleStep = 10; var minBars = Math.min(n, scaleStep); var maxVisible = Math.min(n, 250); var defaultBars = maxVisible; var targetBars = Math.round(Math.max(minBars, defaultBars)); var offset = Math.max(0, n - targetBars);
+    var state = { sx: 1, sy: 1, pmin: globalMin, pmax: globalMax };
+    var activeMarker = null;
+    function priceToY(v, pmin, sy){ return h - pad - (v - pmin) * sy; }
+    function clampOffset(){ var max = Math.max(0, n - targetBars); if(offset > max) offset = max; if(offset < 0) offset = 0; return max; }
+    function visibleBars(){ return Math.max(minBars, Math.min(maxVisible, targetBars)); }
+    function formatBaseLegend(idx, price){ var dt = dts[idx] || ''; return dt + ' | ' + (isFinite(price)? price.toFixed(5): '—'); }
+    function formatIndicatorValue(val){ if(val===true) return '✓'; if(val===false) return '✗'; if(typeof val==='number') return String(val); if(val==null) return '-'; return String(val); }
+    function formatMarkerLegend(marker){ var idx=marker.i; var price=marker.price; var text=formatBaseLegend(idx, price); var extras=[]; if(marker.type){ extras.push(marker.type); } var inds=marker.indicators||{}; var keys=Object.keys(inds).sort(); if(keys.length){ var parts=[]; keys.forEach(function(k){ parts.push(k+': '+formatIndicatorValue(inds[k])); }); extras.push('Indicators: '+parts.join(', ')); } if(extras.length){ text+=' | '+extras.join(' | ');} return text; }
+    function render(){
+      var vb = visibleBars(); if(counter){ counter.textContent = n ? ('Bars: ' + vb + ' / ' + n) : ('Bars: ' + vb); }
+      var useScroll = n > vb; var maxOff = clampOffset(); if(!useScroll){ offset = Math.max(0, n - vb); maxOff = clampOffset(); }
+      var sx = vb > 1 ? (w - 2*pad) / (vb - 1) : (w - 2*pad);
+      var start = offset; var end = Math.min(n, offset + vb);
+      if(activeMarker && (activeMarker.i < start || activeMarker.i >= end)) activeMarker = null;
+      var localMax = -Infinity; var localMin = Infinity; for(var idx=start; idx<end; idx++){ var hi=highs[idx]; var lo=lows[idx]; if(isFinite(hi) && hi>localMax) localMax=hi; if(isFinite(lo) && lo<localMin) localMin=lo; }
+      if(!isFinite(localMax)) localMax = globalMax; if(!isFinite(localMin)) localMin = globalMin; if(localMax===localMin){ var adjust = Math.abs(localMax||1)*0.001; if(!adjust) adjust=0.001; localMax+=adjust; localMin-=adjust; }
+      var sy = (h - 2*pad) / (localMax - localMin);
+      state.sx = sx; state.sy = sy; state.pmin = localMin; state.pmax = localMax; barsG.innerHTML = ''; marksG.innerHTML = '';
+      var tw = Math.max(2.0, Math.min(6.0, sx * 0.35));
+      for(var i=start; i<end; i++){
+        var high = highs[i]; var low = lows[i]; if(!isFinite(high) || !isFinite(low)) continue;
+        var x = pad + (i - offset) * sx;
+        var ln1 = document.createElementNS('http://www.w3.org/2000/svg', 'line'); ln1.setAttribute('x1', x); ln1.setAttribute('x2', x); ln1.setAttribute('y1', priceToY(high, localMin, sy)); ln1.setAttribute('y2', priceToY(low, localMin, sy)); ln1.setAttribute('class', 'bar'); barsG.appendChild(ln1);
+        var openPrice = opens[i]; if(isFinite(openPrice)){ var ln2 = document.createElementNS('http://www.w3.org/2000/svg', 'line'); ln2.setAttribute('x1', x - tw); ln2.setAttribute('x2', x); ln2.setAttribute('y1', priceToY(openPrice, localMin, sy)); ln2.setAttribute('y2', priceToY(openPrice, localMin, sy)); ln2.setAttribute('class', 'bar'); barsG.appendChild(ln2); }
+        var closePrice = closes[i]; if(isFinite(closePrice)){ var ln3 = document.createElementNS('http://www.w3.org/2000/svg', 'line'); ln3.setAttribute('x1', x); ln3.setAttribute('x2', x + tw); ln3.setAttribute('y1', priceToY(closePrice, localMin, sy)); ln3.setAttribute('y2', priceToY(closePrice, localMin, sy)); ln3.setAttribute('class', 'bar'); barsG.appendChild(ln3); }
+      }
+      marks.forEach(function(m){ if(isNaN(m.price)) return; if(m.i < start || m.i >= end) return; var marker = { i:m.i, price:m.price, klass:m.klass, type:m.type, indicators:m.indicators||{} };
+        var markerX = pad + (marker.i - offset) * sx; var markerY = priceToY(marker.price, localMin, sy);
+        var circle = document.createElementNS('http://www.w3.org/2000/svg','circle'); circle.setAttribute('cx', markerX); circle.setAttribute('cy', markerY); circle.setAttribute('r', 3.2); circle.setAttribute('class','mk '+(marker.klass||''));
+        circle.addEventListener('mouseenter', function(){ activeMarker = marker; if(cross){ if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',markerY); hline.setAttribute('y2',markerY);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',markerX); vline.setAttribute('x2',markerX);} cross.style.display=''; } if(legend){ legend.style.display=''; legend.textContent = formatMarkerLegend(marker); } });
+        circle.addEventListener('mouseleave', function(){ activeMarker=null; }); marksG.appendChild(circle);
+      });
+      scroll.max = maxOff; scroll.value = offset; scroll.disabled = !useScroll; scroll.style.opacity = useScroll? '1':'0.35'; scroll.title = useScroll? 'Horizontal scroll':'All bars visible'; if(activeMarker && legend){ legend.textContent = formatMarkerLegend(activeMarker); }
+    }
+    function changeBars(delta){ if(!delta) return; var next = targetBars + delta; next = Math.round(next); if(next<minBars) next=minBars; if(next>maxVisible) next=maxVisible; if(next===targetBars) return; targetBars=next; if(n<=targetBars){ offset=0; } else { clampOffset(); } render(); }
+    toolbar.querySelector('.pc-zoom-in').addEventListener('click', function(){ changeBars(-scaleStep); });
+    toolbar.querySelector('.pc-zoom-out').addEventListener('click', function(){ changeBars(scaleStep); });
+    var resetBtn = toolbar.querySelector('.pc-reset'); if(resetBtn){ resetBtn.addEventListener('click', function(){ targetBars=Math.min(n,maxVisible); targetBars=Math.max(targetBars,minBars); offset=Math.max(0,n-targetBars); activeMarker=null; render(); }); }
+    scroll.addEventListener('input', function(){ offset = parseInt(this.value||'0',10)||0; clampOffset(); render(); });
+    function show(evt){ if(cross) cross.style.display=''; if(legend) legend.style.display=''; move(evt); }
+    function hide(){ activeMarker=null; if(cross) cross.style.display='none'; if(legend) legend.style.display='none'; }
+    function move(evt){ if(!cross) return; var sx = state.sx || 1; if(activeMarker){ var markerX = pad + (activeMarker.i - offset) * sx; var markerY = priceToY(activeMarker.price, state.pmin, state.sy || 1); if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',markerY); hline.setAttribute('y2',markerY);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',markerX); vline.setAttribute('x2',markerX);} if(legend){ legend.textContent = formatMarkerLegend(activeMarker);} return; }
+      var pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY; var loc = pt.matrixTransform(svg.getScreenCTM().inverse()); var x = Math.max(pad, Math.min(w-pad, loc.x)); var y = Math.max(pad, Math.min(h-pad, loc.y)); if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',y); hline.setAttribute('y2',y);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',x); vline.setAttribute('x2',x);} var idx = Math.round((x - pad) / (state.sx||1)) + offset; if(idx < 0) idx = 0; if(idx >= n) idx = n - 1; var price = state.pmin + ((h - pad - y) / (state.sy || 1)); if(!isFinite(price)) price = state.pmin; if(legend){ legend.textContent = formatBaseLegend(idx, price); }
+    }
+    svg.addEventListener('mouseenter', show); svg.addEventListener('mousemove', move); svg.addEventListener('mouseleave', hide); render();
+  }
+
+  // Auto-run on load
+  document.addEventListener('DOMContentLoaded', function(){ startSim(); });
+  // Init spread from selected system
+  document.addEventListener('DOMContentLoaded', function(){
+    var sel = document.getElementById('fSystem');
+    var spreadInput = document.getElementById('fSpread');
+    function refreshSpread(){ var opt = sel.options[sel.selectedIndex]; var sp = (opt && opt.getAttribute('data-spread')) || '0'; spreadInput.value = sp; }
+    if(sel && spreadInput){ refreshSpread(); sel.addEventListener('change', refreshSpread); }
+  });
+})();
+</script>
+<style>
+  .run-btn{ position:relative; overflow:hidden; min-width:120px; }
+  .run-btn .run-progress{ position:absolute; left:0; top:0; bottom:0; width:0%; background:linear-gradient(90deg, #17a2b8, #1abc9c); opacity:.35; pointer-events:none; transition:width .25s ease; }
+  .kpi-table-wrap{ margin-top:1rem; }
+  .kpi-table{ width:100%; border-collapse:collapse; }
+  .kpi-table th{ text-align:left; color:#495057; font-weight:600; padding:8px 6px; }
+  .kpi-table td{ padding:10px 8px; border-top:1px solid #e9ecef; vertical-align:top; }
+  .kpi-section th{ background:#f8f9fa; border-top:2px solid #e9ecef; }
+  .kpi-k{ display:block; color:#6c757d; font-size:12px; }
+  .kpi-v{ display:block; font-weight:600; font-size:16px; }
+  .kpi-sub{ display:block; font-size:12px; color:#6c757d; margin-top:2px; }
+  .kpi-pos{ color:#28a745; }
+  .kpi-neg{ color:#dc3545; }
+  .kpi-spark .spark{ width:100%; height:30px; }
+  .spark-line{ fill:none; stroke:#6f42c1; stroke-width:1.5; }
+  .spark-line.buy{ stroke:#28a745; }
+  .spark-line.sell{ stroke:#dc3545; }
+  .spark-zero{ stroke:#e9ecef; stroke-width:1; }
+  .kpi-inline-dist{ display:flex; align-items:flex-end; justify-content:space-between; gap:14px; }
+  .spark-bars{ display:flex; align-items:flex-end; gap:6px; }
+  .spark-bars .bwrap{ text-align:center; }
+  .spark-bars .bar{ width:8px; background:#6c757d; }
+  .spark-bars .bar.pos{ background:#28a745; }
+  .spark-bars .bar.neg{ background:#dc3545; }
+  .spark-bars .lbl{ font-size:11px; color:#6c757d; margin-top:2px; }
+  .price-svg .bar{ stroke:#4b5563; stroke-width:1; }
+  .mk.buy-open, .mk.buy-close{ fill:#28a745; }
+  .mk.sell-open, .mk.sell-close{ fill:#dc3545; }
+  .pc-cross .cross-h, .pc-cross .cross-v{ stroke:#cbd5e1; stroke-width:.8; }
+  .tabs{ display:flex; gap:8px; margin:6px 0 8px; border-bottom:1px solid #e9ecef; }
+  .tab{ border:1px solid #e9ecef; border-bottom:none; padding:6px 12px; background:#f8f9fa; cursor:pointer; border-top-left-radius:6px; border-top-right-radius:6px; color:#495057; }
+  .tab.active{ background:#fff; color:#212529; border-color:#d0d7de; }
+</style>
+{% endblock %}

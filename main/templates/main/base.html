@@ -8,6 +8,14 @@
     <link rel="stylesheet" href="{% static 'main/css/style.css' %}">
 </head>
 <body>
+    <style>
+      .main-nav .dropdown{ position:relative; }
+      .main-nav .dropdown .submenu{ display:none; position:absolute; top:100%; left:0; background:#fff; border:1px solid #eee; box-shadow:0 4px 12px rgba(0,0,0,0.08); list-style:none; margin:4px 0 0; padding:6px 0; z-index:1000; min-width:220px; }
+      .main-nav .dropdown:hover .submenu{ display:block; }
+      .main-nav .dropdown .submenu li{ margin:0; }
+      .main-nav .dropdown .submenu a{ display:block; padding:8px 12px; color:#333; text-decoration:none; white-space:nowrap; }
+      .main-nav .dropdown .submenu a:hover{ background:#f5f6f8; }
+    </style>
     <header class="header">
         <div class="container">
             <h1 class="logo">
@@ -25,10 +33,13 @@
                             📊 Trading
                         </a>
                     </li>
-                    <li class="nav-item">
-                        <a href="{% url 'main:trading_history' %}" class="nav-link {% if request.resolver_match.url_name == 'trading_history' or request.resolver_match.url_name == 'trading_history_ts' or request.resolver_match.url_name == 'trading_history_mt5' %}active{% endif %}">
-                            📈 Trading History
-                        </a>
+                    <li class="nav-item dropdown">
+                        <a href="{% url 'main:trading_history' %}" class="nav-link {% if request.resolver_match.url_name == 'trading_history' or request.resolver_match.url_name == 'trading_history_ts' or request.resolver_match.url_name == 'trading_history_mt5' %}active{% endif %}">📈 Trading History</a>
+                        <ul class="submenu">
+                            <li><a href="{% url 'main:trading_history' %}">Trading History (Async)</a></li>
+                            <li><a href="{% url 'main:trading_history_ts' %}">TradeStation</a></li>
+                            <li><a href="{% url 'main:trading_history_mt5' %}">MetaTrader5</a></li>
+                        </ul>
                     </li>
                     <li class="nav-item">
                         <a href="{% url 'main:raw_signals' %}" class="nav-link {% if request.resolver_match.url_name == 'raw_signals' %}active{% endif %}">

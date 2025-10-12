@@ -1,0 +1,85 @@
+{# Legacy duplicate (unused) START
+<div class="card">
+    <div class="card-header">
+        <h3 class="card-title">📥 Data Ingestion Service</h3>
+        <div style="float: right;">
+            <button id="startIngestionBtn" class="btn btn-success" onclick="startIngestion()">Start</button>
+            <button id="stopIngestionBtn" class="btn btn-danger" onclick="stopIngestion()">Stop</button>
+            <button class="btn btn-secondary" onclick="refreshIngestionStatus()">Refresh</button>
+            <button class="btn btn-secondary" onclick="openIngestionLogs()">Logs</button>
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    <div style="padding: 1.5rem;">
+        <div class="dashboard-grid">
+            <div class="metric-card">
+                <div id="ingestionActive" class="metric-value">-</div>
+                <div class="metric-label">Active</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionLastRun" class="metric-value">-</div>
+                <div class="metric-label">Last Run</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionFilesScanned" class="metric-value">0</div>
+                <div class="metric-label">Files Scanned</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionFilesImported" class="metric-value">0</div>
+                <div class="metric-label">Files Imported</div>
+            </div>
+            <div class="metric-card">
+                <div id="ingestionRowsImported" class="metric-value">0</div>
+                <div class="metric-label">Rows Imported</div>
+            </div>
+        </div>
+        <div class="alert alert-warning" id="ingestionLastError" style="display:none; margin-top: 1rem;"></div>
+    </div>
+    <script>\n        // CSRF helper for Django\n        function getCookie(name) {\n            let cookieValue = null;\n            if (document.cookie && document.cookie !== '') {\n                const cookies = document.cookie.split(';');\n                for (let i = 0; i < cookies.length; i++) {\n                    const cookie = cookies[i].trim();\n                    if (cookie.substring(0, name.length + 1) === (name + '=')) {\n                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));\n                        break;\n                    }\n                }\n            }\n            return cookieValue;\n        }\n        function refreshIngestionStatus() {
+            fetch('/api/ingestion/status/')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) return;
+                    document.getElementById('ingestionActive').textContent = data.active ? 'ON' : 'OFF';
+                    document.getElementById('ingestionActive').style.color = data.active ? '#28a745' : '#dc3545';
+                    document.getElementById('ingestionLastRun').textContent = data.last_run ? new Date(data.last_run).toLocaleString() : '-';
+                    document.getElementById('ingestionFilesScanned').textContent = data.files_scanned ?? 0;
+                    document.getElementById('ingestionFilesImported').textContent = data.files_imported ?? 0;
+                    document.getElementById('ingestionRowsImported').textContent = data.rows_imported ?? 0;
+                    const errBox = document.getElementById('ingestionLastError');
+                    if (data.last_error) {
+                        errBox.style.display = 'block';
+                        errBox.textContent = 'Last error: ' + data.last_error;
+                    } else {
+                        errBox.style.display = 'none';
+                        errBox.textContent = '';
+                    }
+                    try {
+                        const hb = document.getElementById('ingestionHeartbeat');
+                        if (hb) {
+                            const intervalMs = (data.scan_interval || 5) * 1000;
+                            const last = data.last_run ? Date.parse(data.last_run) : 0;
+                            const ok = last && (Date.now() - last) <= (2 * intervalMs);
+                            hb.textContent = ok ? 'OK' : 'STALE';
+                            hb.style.color = ok ? '#28a745' : '#dc3545';
+                        }
+                    } catch (e) {}
+                })
+                .catch(() => {});
+        }
+
+        window.startIngestion = function(){
+            fetch('/api/ingestion/start/', { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': getCookie('csrftoken') } }).then(() => refreshIngestionStatus());
+        }
+
+        window.stopIngestion = function(){
+            fetch('/api/ingestion/stop/', { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': getCookie('csrftoken') } }).then(() => refreshIngestionStatus());
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            refreshIngestionStatus();
+            setInterval(refreshIngestionStatus, 5000);
+        });
+    </script>
+</div>
+#}

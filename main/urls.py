@@ -5,7 +5,8 @@ app_name = 'main'
 
 urlpatterns = [
     path('', views.home, name='home'),
-    path('trading-history/', views.trading_history_ts, name='trading_history'),
+    # Async Trading History entry page with progress bar
+    path('trading-history/', views.trading_history_async, name='trading_history'),
     path('trading-history/tradestation/', views.trading_history_ts, name='trading_history_ts'),
     path('trading-history/metatrader/', views.trading_history_mt5, name='trading_history_mt5'),
     path('trading/', views.trading_home, name='trading'),
@@ -35,6 +36,10 @@ urlpatterns = [
     path('api/ingestion/logs/', views.ingestion_logs_api, name='ingestion_logs'),
     path('api/ingestion/start/', views.start_ingestion_service, name='start_ingestion'),
     path('api/ingestion/stop/', views.stop_ingestion_service, name='stop_ingestion'),
+    # TS Simulation async API
+    path('api/sim/ts/start/', views.api_ts_sim_start, name='api_ts_sim_start'),
+    path('api/sim/ts/status/', views.api_ts_sim_status, name='api_ts_sim_status'),
+    path('api/sim/ts/result/', views.api_ts_sim_result, name='api_ts_sim_result'),
     # Trading Systems API
     path('api/trading-systems/', views.api_trading_systems, name='api_trading_systems'),
     path('api/trading-systems/<int:system_id>/', views.api_trading_system_detail, name='api_trading_system_detail'),

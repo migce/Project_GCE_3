@@ -27,6 +27,7 @@ import json
 from numbers import Number
 from collections import deque, Counter
 from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.http import require_http_methods
 
 # Create your views here.
 
@@ -58,6 +59,16 @@ def trading_history(request):
         'trades': [],  # Заглушка
     }
     return render(request, 'main/trading_history.html', context)
+
+@ensure_csrf_cookie
+def trading_history_async(request):
+    """Async Trading History page with client-side progress.
+
+    Renders a lightweight page; the browser starts a background simulation job
+    via API and shows progress until results are ready.
+    """
+    systems = TradingSystem.objects.all().order_by('system_sid')
+    return render(request, 'main/trading_history_async.html', {'systems': systems})
 
 def system_dashboard(request):
     """Системный дашборд с мониторингом MT5"""
@@ -1093,6 +1104,166 @@ def ingestion_logs_api(request):
             })
         return JsonResponse({'success': True, 'logs': data})
     return JsonResponse({'success': False, 'message': 'Only GET allowed'})
+
+
+# -----------------------------
+# TS Simulation async API
+# -----------------------------
+
+@require_http_methods(["POST"])
+def api_ts_sim_start(request):
+    try:
+        system_id = int(request.POST.get('system') or request.POST.get('system_id'))
+        base_level = int(request.POST.get('tf') or request.POST.get('base_level') or 1)
+        start_balance = float((request.POST.get('balance') or '10000').replace(',', '.'))
+        lot_size = float((request.POST.get('lot') or '0.01').replace(',', '.'))
+        spread_pips = request.POST.get('spread')
+        try:
+            spread_pips = float((spread_pips or '').replace(',', '.')) if spread_pips not in (None, '') else None
+        except Exception:
+            spread_pips = None
+    except Exception:
+        return JsonResponse({'success': False, 'message': 'Invalid input params'}, status=400)
+
+    try:
+        system = TradingSystem.objects.get(id=system_id)
+    except TradingSystem.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'System not found'}, status=404)
+
+    from .services.ts_sim_jobs import start_ts_simulation
+    from .services.ts_sim_engine import compute_ts_simulation
+
+    # Precompute tick info in request thread (MT5 tends to be more stable here)
+    mt5_tick_size = None
+    mt5_usd_per_tick_lot = None
+    mt5_tick_reason = None
+    try:
+        sym = (request.POST.get('symbol') or getattr(system, 'symbol', None))
+        if sym:
+            import MetaTrader5 as mt5
+            svc = MT5Manager.get_default_service()
+            if svc:
+                with svc as s:
+                    if s.is_connected:
+                        try:
+                            cand = str(sym).strip()
+                            # direct attempt
+                            mt5.symbol_select(cand, True)
+                            info = mt5.symbol_info(cand)
+                            ts = getattr(info, 'trade_tick_size', None) if info else None
+                            tv = getattr(info, 'trade_tick_value', None) if info else None
+                            if ts and tv and ts > 0 and tv > 0:
+                                mt5_tick_size = float(ts)
+                                mt5_usd_per_tick_lot = float(tv) * float(lot_size)
+                            else:
+                                # doubles
+                                ts2 = mt5.symbol_info_double(cand, mt5.SYMBOL_TRADE_TICK_SIZE)
+                                tv2 = mt5.symbol_info_double(cand, mt5.SYMBOL_TRADE_TICK_VALUE)
+                                if ts2 and tv2 and ts2 > 0 and tv2 > 0:
+                                    mt5_tick_size = float(ts2)
+                                    mt5_usd_per_tick_lot = float(tv2) * float(lot_size)
+                                else:
+                                    # fallback: scan symbols_get like TS page
+                                    try:
+                                        all_syms = mt5.symbols_get()
+                                    except Exception:
+                                        all_syms = None
+                                    match = None
+                                    if all_syms:
+                                        # exact case-insensitive match
+                                        for si in all_syms:
+                                            nm = getattr(si, 'name', '')
+                                            if nm and nm.lower() == cand.lower():
+                                                match = nm
+                                                break
+                                        if not match:
+                                            base = ''.join([c for c in cand if c.isalnum()]).upper()
+                                            for si in all_syms:
+                                                nm = getattr(si, 'name', '')
+                                                key = nm.replace('.', '').upper() if nm else ''
+                                                if key and (key.startswith(base) or base.startswith(key)):
+                                                    match = nm
+                                                    break
+                                    if match:
+                                        try:
+                                            mt5.symbol_select(match, True)
+                                            info2 = mt5.symbol_info(match)
+                                            ts = getattr(info2, 'trade_tick_size', None) if info2 else None
+                                            tv = getattr(info2, 'trade_tick_value', None) if info2 else None
+                                            if ts and tv and ts > 0 and tv > 0:
+                                                mt5_tick_size = float(ts)
+                                                mt5_usd_per_tick_lot = float(tv) * float(lot_size)
+                                            else:
+                                                ts3 = mt5.symbol_info_double(match, mt5.SYMBOL_TRADE_TICK_SIZE)
+                                                tv3 = mt5.symbol_info_double(match, mt5.SYMBOL_TRADE_TICK_VALUE)
+                                                if ts3 and tv3 and ts3 > 0 and tv3 > 0:
+                                                    mt5_tick_size = float(ts3)
+                                                    mt5_usd_per_tick_lot = float(tv3) * float(lot_size)
+                                                else:
+                                                    mt5_tick_reason = "No tick info for '" + match + "'"
+                                        except Exception as e:
+                                            mt5_tick_reason = str(e)
+                                    else:
+                                        mt5_tick_reason = f"Symbol '{cand}' not found"
+                        except Exception as e:
+                            mt5_tick_reason = str(e)
+                    else:
+                        mt5_tick_reason = 'MT5 not connected'
+            else:
+                mt5_tick_reason = 'No default MT5 service'
+    except Exception as e:
+        mt5_tick_reason = str(e)
+
+    # Final fallback: approximate from pip size and $10 per pip per 1.0 lot
+    if mt5_tick_size is None or mt5_usd_per_tick_lot is None:
+        try:
+            base_sym = (sym or '').upper()
+            pip_scale = 100 if 'JPY' in base_sym else 10000
+            pip_size = 1.0 / float(pip_scale)
+            mt5_tick_size = mt5_tick_size if mt5_tick_size is not None else pip_size
+            if mt5_usd_per_tick_lot is None:
+                mt5_usd_per_tick_lot = 10.0 * float(lot_size)
+            if not mt5_tick_reason:
+                mt5_tick_reason = 'Approx: no MT5 tick info'
+        except Exception:
+            pass
+
+    def _worker(cb):
+        res = compute_ts_simulation(system, base_level, start_balance, lot_size, cb, spread_pips=spread_pips)
+        if mt5_tick_size is not None:
+            res['mt5_tick_size'] = mt5_tick_size
+        if mt5_usd_per_tick_lot is not None:
+            res['mt5_usd_per_tick_lot'] = mt5_usd_per_tick_lot
+        if mt5_tick_reason and not res.get('mt5_tick_reason'):
+            res['mt5_tick_reason'] = mt5_tick_reason
+        return res
+
+    job_id = start_ts_simulation(system.id, base_level, start_balance, lot_size, _worker)
+    return JsonResponse({'success': True, 'job_id': job_id})
+
+
+def api_ts_sim_status(request):
+    from .services.ts_sim_jobs import get_job
+    job_id = request.GET.get('job_id')
+    if not job_id:
+        return JsonResponse({'success': False, 'message': 'job_id required'}, status=400)
+    job = get_job(job_id)
+    if not job:
+        return JsonResponse({'success': False, 'message': 'job not found'}, status=404)
+    return JsonResponse({'success': True, 'status': job.status, 'progress': job.progress, 'message': job.message})
+
+
+def api_ts_sim_result(request):
+    from .services.ts_sim_jobs import get_job
+    job_id = request.GET.get('job_id')
+    if not job_id:
+        return JsonResponse({'success': False, 'message': 'job_id required'}, status=400)
+    job = get_job(job_id)
+    if not job:
+        return JsonResponse({'success': False, 'message': 'job not found'}, status=404)
+    if job.status != 'done':
+        return JsonResponse({'success': False, 'message': 'not ready', 'status': job.status, 'progress': job.progress})
+    return JsonResponse({'success': True, 'result': job.result})
 
 
 def start_ingestion_service(request):
