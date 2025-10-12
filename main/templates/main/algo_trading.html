@@ -1,0 +1,338 @@
+{% extends 'main/base.html' %}
+
+{% block title %}AlgoTrading - Project GCE 3{% endblock %}
+
+{% block content %}
+<div class="card card-flat">
+  <div class="card-header" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+    <h2 class="page-title-pro" style="margin:0;">AlgoTrading</h2>
+    <div id="rtMode" class="rt-badge">Updates: -</div>
+  </div>
+  <div class="kpi-table-wrap">
+    <table class="kpi-table">
+      <tr>
+        <td colspan="6">
+          <span class="kpi-k">MT5 Connection</span>
+          <select id="mt5ConnSelect" class="form-pro-control" style="max-width:340px; display:inline-block; margin-left:8px;"></select>
+        </td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="kpi-table-wrap" style="margin-top:.5rem;">
+    <table class="kpi-table">
+      <tr>
+        <td><span class="kpi-k">Account</span><span class="kpi-v" id="accLogin">-</span><span id="accConnStatus" class="kpi-sub">-</span></td>
+        <td><span class="kpi-k">Currency</span><span class="kpi-v" id="accCurrency">-</span></td>
+        <td><span class="kpi-k">Balance</span><span class="kpi-v" id="accBalance">-</span></td>
+        <td><span class="kpi-k">Equity</span><span class="kpi-v" id="accEquity">-</span></td>
+        <td><span class="kpi-k">Leverage</span><span class="kpi-v" id="accLeverage">-</span></td>
+        <td><span class="kpi-k">Positions / Margin</span><span class="kpi-v" id="accPosMargin">-</span></td>
+      </tr>
+    </table>
+  </div>
+  <div class="table-pro" style="margin-top:.5rem;">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th style="width:30%;">Symbol</th>
+          <th style="width:20%;">Bid</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="algoQuotesBody">
+        <tr><td colspan="3" style="text-align:center; color:#6c757d;">No quotes</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="table-pro" style="margin-top:.5rem;">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th>Ticket</th>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th>Volume</th>
+          <th>Open</th>
+          <th>SL</th>
+          <th>TP</th>
+          <th>Now</th>
+          <th>Profit</th>
+          <th>Open Time</th>
+          <th>Comment</th>
+          <th>Magic</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="algoOpenPositions">
+        <tr><td colspan="13" style="text-align:center; color:#6c757d;">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+<script>
+var CONN_MAP = {};
+function setRT(mode, isOk){
+  var el = document.getElementById('rtMode');
+  if(!el) return;
+  el.textContent = 'Updates: ' + (mode||'-');
+  var cls = 'rt-badge';
+  if(isOk === false) cls += ' err';
+  else if(isOk === true || isOk === undefined) cls += ' ok';
+  el.className = cls;
+}
+function fillSelect(conns){
+  const sel=document.getElementById('mt5ConnSelect'); if(!sel) return;
+  sel.innerHTML = '';
+  CONN_MAP = {};
+  (conns||[]).forEach(c=>{
+    CONN_MAP[String(c.id)] = c;
+    const opt=document.createElement('option');
+    opt.value = c.id; opt.textContent = (c.name||c.server||'') + (c.login? ' ('+c.login+')':'' );
+    if(!c.is_connected) opt.textContent += ' [disconnected]';
+    sel.appendChild(opt);
+  });
+}
+function loadConnections(){
+  fetch('{% url "main:mt5_status_api" %}').then(r=>r.json()).then(d=>{ if(!d||!d.success) return; fillSelect(d.connections||[]); loadAccount(); });
+}
+function setKV(id,val){ var el=document.getElementById(id); if(el){ el.textContent = val; } }
+function loadAccount(){
+  const sel=document.getElementById('mt5ConnSelect'); if(!sel||!sel.value) return;
+  fetch('{% url "main:mt5_account_overview" %}?settings_id='+encodeURIComponent(sel.value))
+    .then(r=>r.json())
+    .then(d=>{
+      if(!d||!d.success) return;
+      const a=d.account||{};
+      setKV('accLogin', a.login!=null?a.login:'-');
+      // connection indicator
+      var ci = document.getElementById('accConnStatus');
+      var meta = CONN_MAP[String(sel.value)];
+      if(ci){
+        if(meta && meta.is_connected){ ci.textContent='Connected'; ci.className='kpi-sub kpi-pos'; }
+        else { ci.textContent='Disconnected'; ci.className='kpi-sub kpi-neg'; }
+      }
+      setKV('accCurrency', a.currency||'-');
+      setKV('accBalance', a.balance!=null? ('$'+Number(a.balance).toFixed(2)) : '-');
+      setKV('accEquity', a.equity!=null? ('$'+Number(a.equity).toFixed(2)) : '-');
+      setKV('accLeverage', a.leverage!=null? a.leverage : '-');
+      const pm = (a.positions_count!=null? a.positions_count : '-') + ' / ' + (a.margin!=null? ('$'+Number(a.margin).toFixed(2)):'-');
+      setKV('accPosMargin', pm);
+    });
+}
+function format5(v){ return (v==null? '-' : Number(v).toFixed(5)); }
+function format2(v){ return (v==null? '-' : ('$'+Number(v).toFixed(2))); }
+function renderQuotes(quotes){
+  const body=document.getElementById('algoQuotesBody'); if(!body) return;
+  const rows = Array.isArray(quotes)? quotes : [];
+  if(!rows.length){ body.innerHTML = '<tr><td colspan="3" style="text-align:center; color:#6c757d;">No quotes</td></tr>'; return; }
+  body.innerHTML = rows.map(q=>{
+    const sym = q.symbol || '';
+    const bid = (q.bid!=null? Number(q.bid).toFixed(5) : '-');
+    return '<tr><td>'+sym+'</td><td>'+bid+'</td><td></td></tr>';
+  }).join('');
+}
+function applyPositions(d){
+  const body=document.getElementById('algoOpenPositions'); if(!body) return;
+  try{
+      if(!d||!d.success){ body.innerHTML='<tr><td colspan="13" style="text-align:center; color:#dc3545;">Failed to load positions</td></tr>'; return; }
+      const rows=d.positions||[]; if(d.quotes){ renderQuotes(d.quotes); }
+      if(!rows.length){
+        body.innerHTML='<tr><td colspan="13" style="text-align:center; color:#6c757d;">No open positions</td></tr>';
+        // Reset per-magic counters on System Trading table
+        document.querySelectorAll('tr[data-id] .st-open').forEach(el=>{ el.textContent='-'; });
+        return;
+      }
+      body.innerHTML = rows.map(p=>{
+        const profit = (p.profit!=null? ('$'+Number(p.profit).toFixed(2)):'-');
+        const t = p.time? new Date(p.time).toLocaleString():'-';
+        return '<tr>'+
+          '<td>'+ (p.ticket||'') +'</td>'+
+          '<td>'+ (p.symbol||'') +'</td>'+
+          '<td>'+ (p.type||'') +'</td>'+
+          '<td>'+ (p.volume!=null? Number(p.volume).toFixed(2): '-') +'</td>'+
+          '<td>'+ format5(p.price_open) +'</td>'+
+          '<td>'+ format5(p.sl) +'</td>'+
+          '<td>'+ format5(p.tp) +'</td>'+
+          '<td>'+ format5(p.price_current) +'</td>'+
+          '<td>'+ profit +'</td>'+
+          '<td>'+ t +'</td>'+
+          '<td>'+ (p.comment||'') +'</td>'+
+          '<td>'+ (p.magic||'') +'</td>'+
+          '<td><button class="btn btn-secondary btn-sm" onclick="algoClose('+ (p.ticket||'') +')">Close</button></td>'+
+          '</tr>';
+      }).join('');
+      // Aggregate by magic number and update System Trading table
+      const byMagic = {};
+      rows.forEach(p=>{
+        const m = p.magic;
+        const side = (p.type||'').toUpperCase();
+        if(m==null || (side!=='BUY' && side!=='SELL')) return;
+        const key = String(m);
+        if(!byMagic[key]) byMagic[key] = { BUY:{c:0,v:0}, SELL:{c:0,v:0} };
+        byMagic[key][side].c += 1;
+        const vol = Number(p.volume||0);
+        if(!Number.isNaN(vol)) byMagic[key][side].v += vol;
+      });
+      document.querySelectorAll('tr[data-id]').forEach(tr=>{
+        const magic = tr.getAttribute('data-magic');
+        const el = tr.querySelector('.st-open');
+        if(!el){ return; }
+        if(magic && byMagic[magic]){
+          const b = byMagic[magic].BUY; const s = byMagic[magic].SELL;
+          const parts = [];
+          if(b.c) parts.push('B:'+b.c+'('+b.v.toFixed(2)+')');
+          if(s.c) parts.push('S:'+s.c+'('+s.v.toFixed(2)+')');
+          el.textContent = parts.length? parts.join(' '): '0';
+        } else {
+          el.textContent = '-';
+        }
+      });
+  }catch(e){
+      body.innerHTML='<tr><td colspan="13" style="text-align:center; color:#dc3545;">Failed to load positions</td></tr>';
+      document.querySelectorAll('tr[data-id] .st-open').forEach(el=>{ el.textContent='-'; });
+  }
+}
+
+function refreshPositions(){
+  fetch('{% url "main:api_mt5_open_positions" %}')
+    .then(r=>r.json())
+    .then(async function(d){ try{ const qr = await fetch('{% url "main:api_mt5_quotes" %}'); const qd = await qr.json(); if(qd&&qd.success){ renderQuotes(qd.quotes||[]); } }catch(e){} applyPositions(d); })
+    .catch(()=>applyPositions({success:false}))
+}
+function getCookie(name) { const value = `; ${document.cookie}`; const parts = value.split(`; ${name}=`); if (parts.length === 2) return parts.pop().split(';').shift(); }
+function algoClose(ticket){ if(!ticket) return; fetch('{% url "main:mt5_close_position" %}', { method:'POST', headers:{'X-CSRFToken': getCookie('csrftoken')}, body: new URLSearchParams({ticket: String(ticket)}) }).then(r=>r.json()).then(()=>refreshPositions()); }
+document.addEventListener('DOMContentLoaded', function(){
+  loadConnections();
+  const sel=document.getElementById('mt5ConnSelect'); if(sel){ sel.addEventListener('change', function(){ loadAccount(); }); }
+  // WebSocket realtime; fallback to SSE, then polling
+  const startPolling = () => { setRT('Polling'); refreshPositions(); setInterval(refreshPositions, 10000); };
+  const startSse = () => {
+    try{
+      if(!window.EventSource) return startPolling();
+      const es = new EventSource('{% url "main:api_mt5_open_positions_stream" %}');
+      es.onopen = function(){ setRT('SSE'); };
+      es.addEventListener('positions', function(ev){
+        try{ const d = JSON.parse(ev.data||'{}'); applyPositions(d); }catch(e){}
+      });
+      es.onerror = function(){ /* browser will reconnect */ };
+    }catch(e){ startPolling(); }
+  };
+  const startWs = () => {
+    try{
+      const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      // Prefer dedicated WS port 8001 (Daphne), fall back to current port
+      const WS_PORT = '8001';
+      const hostPref = `${location.hostname}:${WS_PORT}`;
+      const urlPrimary = `${proto}://${hostPref}/ws/mt5/open_positions/`;
+      const urlFallback = `${proto}://${location.host}/ws/mt5/open_positions/`;
+      let triedFallback = false;
+      const connect = (u) => {
+        const ws = new WebSocket(u);
+        setRT('WebSocket');
+        ws.onopen = () => setRT('WebSocket');
+        ws.onmessage = (ev) => {
+          try{ const d = JSON.parse(ev.data||'{}'); applyPositions(d); }catch(e){}
+        };
+        ws.onclose = () => {
+          if(!triedFallback && u !== urlFallback){ triedFallback = true; setRT('SSE…', false); connect(urlFallback); return; }
+          setTimeout(startSse, 1000);
+        };
+        ws.onerror = () => { setRT('WS error', false); try{ ws.close(); }catch(_){} };
+      };
+      connect(urlPrimary);
+    }catch(e){ startSse(); }
+  };
+  startWs();
+});
+</script>
+<div class="card card-flat" style="margin-top:1rem;">
+  <div class="card-header">
+    <h3 class="page-title-pro" style="margin:0;">System Trading</h3>
+  </div>
+  <div class="table-pro">
+    <table class="table">
+      <thead>
+        <tr style="background:#f8f9fa;">
+          <th style="width:24%;">System</th>
+          <th style="width:14%;">Symbol</th>
+          <th style="width:12%;">Magic</th>
+          <th style="width:18%;">Open Deals</th>
+          <th style="width:14%;">Allow Trading</th>
+          <th style="width:10%;">Lot Size</th>
+          <th style="width:8%;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in systems %}
+        <tr data-id="{{ s.id }}" data-magic="{% if s.magic_number %}{{ s.magic_number }}{% endif %}">
+          <td><span class="dot {% if s.is_active %}on{% else %}off{% endif %}"></span>{{ s.system_sid }}</td>
+          <td>{{ s.symbol }}</td>
+          <td>{% if s.magic_number %}{{ s.magic_number }}{% else %}-{% endif %}</td>
+          <td><span class="st-open">-</span></td>
+          <td>
+            <label class="toggle-switch" {% if not s.magic_number %}title="Magic number required"{% elif not s.is_active %}title="System is inactive"{% endif %}>
+              <input type="checkbox" class="st-enabled" {% if s.trading_enabled %}checked{% endif %} {% if not s.magic_number or not s.is_active %}disabled{% endif %} />
+              <span class="toggle-slider"></span>
+            </label>
+          </td>
+          <td>
+            <input type="number" class="st-lot" step="0.01" min="0.01" value="{{ s.lot_size|floatformat:2 }}" style="width:100%; padding:0.35rem; border:1px solid #ddd; border-radius:4px;" />
+          </td>
+          <td>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <a class="btn btn-secondary btn-sm" href="{% url 'main:trading_history' %}?system={{ s.id }}" title="Open in Trading History">
+                <svg viewBox="0 0 24 24" width="16" height="16" style="vertical-align:middle;"><path d="M3 19V5"/><path d="M3 19h18"/><path d="M6 15l5-5 4 4 5-6"/></svg>
+              </a>
+              <button class="btn btn-pro btn-st-save">Save</button>
+            </div>
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center; color:#6c757d; padding:1rem;">No systems</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<script>
+function postForm(url, data){ const fd=new URLSearchParams(); Object.entries(data||{}).forEach(([k,v])=>fd.append(k,v)); return fetch(url,{method:'POST', headers:{'X-CSRFToken': getCookie('csrftoken')}, body:fd}).then(r=>r.json()); }
+document.addEventListener('DOMContentLoaded', function(){
+  document.querySelectorAll('.btn-st-save').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const tr=btn.closest('tr');
+      const id=tr.getAttribute('data-id');
+      const enabled = tr.querySelector('.st-enabled').checked ? '1':'0';
+      const lotStr = (tr.querySelector('.st-lot').value || '0.01').replace(',', '.');
+      btn.disabled=true; const text=btn.textContent; btn.textContent='Saving...';
+      try{ await postForm('{% url "main:api_system_trading_update" %}', { id, enabled, lot:lotStr }); }
+      finally{ btn.disabled=false; btn.textContent=text; }
+    });
+  });
+  // Instant toggle: update system on switch change
+  document.querySelectorAll('.st-enabled').forEach(chk=>{
+    chk.addEventListener('change', async ()=>{
+      const tr = chk.closest('tr');
+      const id = tr.getAttribute('data-id');
+      const lotInput = tr.querySelector('.st-lot');
+      const lotStr = (lotInput && lotInput.value ? lotInput.value : '0.01').replace(',', '.');
+      const prev = !chk.checked; // previous state to revert on failure
+      chk.disabled = true;
+      try{
+        const res = await postForm('{% url "main:api_system_trading_update" %}', { id, enabled: chk.checked ? '1':'0', lot: lotStr });
+        if(!res || !res.success){
+          chk.checked = prev; // revert
+          alert((res && res.message) ? res.message : 'Failed to update setting');
+        }
+      }catch(e){
+        chk.checked = prev; // revert
+        alert('Network error while updating');
+      }finally{
+        chk.disabled = false;
+      }
+    });
+  });
+});
+</script>
+{% endblock %}
+
+

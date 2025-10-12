@@ -36,7 +36,9 @@ SECRET_KEY = 'django-insecure-ahpth=)kw*yhirtcd-9+(%+rf)e^ks_p2wwxxp0^sm+gkh$=i+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    '127.0.0.1', 'localhost'
+]
 
 
 # Application definition
@@ -48,6 +50,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',
     'main.apps.MainConfig',
 ]
 
@@ -80,6 +83,21 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'gce_project.wsgi.application'
+
+# Channels / ASGI
+ASGI_APPLICATION = 'gce_project.asgi.application'
+
+# Local, in‑memory channel layer for dev
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer'
+    }
+}
+
+# Background services autostart toggles (can be overridden via env)
+AUTOSTART_GLOBAL_INGESTION = os.environ.get('AUTOSTART_GLOBAL_INGESTION', 'true').lower() == 'true'
+AUTOSTART_MT5_MONITORING = os.environ.get('AUTOSTART_MT5_MONITORING', 'true').lower() == 'true'
+AUTOSTART_SYSTEM_TRADER = os.environ.get('AUTOSTART_SYSTEM_TRADER', 'true').lower() == 'true'
 
 
 # Database

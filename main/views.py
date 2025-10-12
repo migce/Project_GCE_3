@@ -1,5 +1,5 @@
 from django.shortcuts import render
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Max
@@ -20,6 +20,7 @@ import sys
 import platform
 from datetime import datetime
 import os
+import time
 import csv
 import glob
 from pathlib import Path
@@ -78,6 +79,15 @@ def home(request):
     }
 
     return render(request, 'main/home.html', context)
+
+
+def algo_trading(request):
+    """AlgoTrading landing page: MT5 account overview, open positions, and system trading controls."""
+    try:
+        systems = list(TradingSystem.objects.all().order_by('system_sid'))
+    except Exception:
+        systems = []
+    return render(request, 'main/algo_trading.html', { 'systems': systems })
 
 def trading_history(request):
     """Страница торговой истории"""
@@ -511,6 +521,68 @@ def mt5_status_api(request):
         'success': False,
         'message': 'Only GET method allowed'
     })
+
+
+def mt5_account_overview(request):
+    """API: detailed MT5 account overview for a selected connection.
+
+    Params (GET): settings_id
+    Returns: currency, balance, equity, leverage, positions_count, margin
+    """
+    try:
+        settings_id = request.GET.get('settings_id')
+        if not settings_id:
+            return JsonResponse({'success': False, 'message': 'settings_id is required'}, status=400)
+        from .models import MT5ConnectionSettings
+        try:
+            settings = MT5ConnectionSettings.objects.get(id=settings_id)
+        except MT5ConnectionSettings.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'Connection settings not found'}, status=404)
+
+        from .services.mt5_service import MT5Service
+        info = {}
+        positions_count = None
+        with MT5Service(settings) as svc:
+            if svc.is_connected:
+                acc = svc.get_account_info() or {}
+                info = {
+                    'login': acc.get('login'),
+                    'currency': acc.get('currency'),
+                    'balance': acc.get('balance'),
+                    'equity': acc.get('equity'),
+                    'leverage': acc.get('leverage'),
+                    'margin': acc.get('margin'),
+                }
+                try:
+                    positions = svc.get_open_positions() or []
+                    positions_count = len(positions)
+                except Exception:
+                    positions_count = None
+            else:
+                return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'}, status=500)
+        info['positions_count'] = positions_count
+        return JsonResponse({'success': True, 'account': info})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+def api_mt5_open_positions(request):
+    """API: list open positions from default MT5 connection.
+
+    Returns array of dicts compatible with trading_positions table.
+    """
+    try:
+        svc_mgr = MT5Manager.get_default_service()
+        if not svc_mgr:
+            return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'}, status=400)
+        positions = []
+        with svc_mgr as svc:
+            if not svc.is_connected:
+                return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'}, status=500)
+            positions = svc.get_open_positions() or []
+        return JsonResponse({'success': True, 'positions': positions})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
 
 
 def disconnect_mt5(request):
@@ -1124,6 +1196,18 @@ def ingestion_status_api(request):
     """API endpoint to get data ingestion worker status and KPIs"""
     if request.method == 'GET':
         st = DataIngestionStatus.get()
+        # Extra KPIs: total files in system, processed files, and last bar time
+        try:
+            from .models import MarketDataFile, MarketBar
+            files_in_system = MarketDataFile.objects.count()
+            files_processed = MarketDataFile.objects.filter(processed_at__isnull=False).count()
+            last_bar = MarketBar.objects.order_by('-dt').values_list('dt', flat=True).first()
+            last_bar_iso = last_bar.isoformat() if last_bar else None
+        except Exception:
+            files_in_system = None
+            files_processed = None
+            last_bar_iso = None
+
         return JsonResponse({
             'success': True,
             'active': st.active,
@@ -1132,6 +1216,9 @@ def ingestion_status_api(request):
             'files_scanned': st.files_scanned,
             'files_imported': st.files_imported,
             'rows_imported': st.rows_imported,
+            'files_in_system': files_in_system,
+            'files_processed': files_processed,
+            'last_bar_dt': last_bar_iso,
             'last_error': st.last_error or None,
         })
     return JsonResponse({'success': False, 'message': 'Only GET allowed'})
@@ -2291,9 +2378,12 @@ def trading_home(request):
     return render(request, 'main/trading_home.html', context)
 
 
+ 
+
+
 @ensure_csrf_cookie
-def trading_positions(request):
-    """Show current open positions from MetaTrader 5."""
+def manual_trading(request):
+    """Manual trading page with BUY/SELL controls and quick position view."""
     positions = []
     error = None
     account = None
@@ -2317,8 +2407,7 @@ def trading_positions(request):
         'account': account,
         'error': error,
     }
-    return render(request, 'main/trading_positions.html', context)
-
+    return render(request, 'main/manual_trading.html', context)
 
 # --- Manual trading API ---
 from django.views.decorators.http import require_POST
@@ -2394,10 +2483,7 @@ def mt5_close_position(request):
         return JsonResponse(res)
 
 
-@ensure_csrf_cookie
-def system_trading(request):
-    systems = TradingSystem.objects.all().order_by('system_sid')
-    return render(request, 'main/system_trading.html', { 'systems': systems })
+ 
 
 
 from django.views.decorators.http import require_POST
@@ -2422,6 +2508,12 @@ def api_system_trading_update(request):
             raise ValueError('Lot must be positive')
     except Exception as e:
         return JsonResponse({'success': False, 'message': f'Invalid lot: {e}'})
+    # Guard: cannot enable without magic number
+    if enabled and not getattr(sys, 'magic_number', None):
+        return JsonResponse({'success': False, 'message': 'Magic number is required to enable auto-trading'})
+    # Guard: cannot enable when system is inactive
+    if enabled and not getattr(sys, 'is_active', False):
+        return JsonResponse({'success': False, 'message': 'System is inactive; cannot enable auto-trading'})
     # Save
     sys.trading_enabled = enabled
     sys.lot_size = lot
@@ -2465,6 +2557,69 @@ def api_system_positions(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)})
 
+
+@require_GET
+def api_mt5_open_positions_stream(request):
+    """Server-Sent Events stream with open positions snapshots.
+
+    Emits an event 'positions' every 2 seconds with the same payload shape
+    as api_mt5_open_positions.
+    """
+    def gen():
+        # soft runtime limit ~10 minutes
+        max_iters = 300
+        # persistent service for this stream
+        service = MT5Manager.get_default_service()
+        if not service:
+            def _err(msg):
+                yield f"event: positions\ndata: {json.dumps({'success': False, 'message': msg})}\n\n"
+            yield from _err('Default MT5 settings not configured')
+            return
+        if not service.is_connected:
+            try:
+                service.connect()
+            except Exception:
+                pass
+        # preload symbols list once per stream
+        try:
+            symbols = list(TradingSystem.objects.values_list('symbol', flat=True).distinct())
+        except Exception:
+            symbols = []
+        for _ in range(max_iters):
+            payload = {}
+            try:
+                if not service.is_connected:
+                    if not service.connect():
+                        payload = {'success': False, 'message': 'Failed to connect to MT5'}
+                    else:
+                        payload = {'success': True}
+                rows = service.get_open_positions() if service.is_connected else []
+                norm = []
+                for p in rows or []:
+                    q = dict(p)
+                    t = q.get('time')
+                    try:
+                        if hasattr(t, 'strftime'):
+                            q['time'] = t.strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        pass
+                    norm.append(q)
+                quotes = []
+                for sym in symbols:
+                    try:
+                        bid = service.get_symbol_bid(sym) if hasattr(service, 'get_symbol_bid') else None
+                    except Exception:
+                        bid = None
+                    quotes.append({'symbol': sym, 'bid': bid})
+                payload = {'success': True, 'positions': norm, 'quotes': quotes}
+            except Exception as e:
+                payload = {'success': False, 'message': str(e)}
+            data = json.dumps(payload, default=str)
+            yield f"event: positions\ndata: {data}\n\n"
+            time.sleep(2)
+    resp = StreamingHttpResponse(gen(), content_type='text/event-stream')
+    resp['Cache-Control'] = 'no-cache'
+    return resp
 
 @require_GET
 def api_system_deals(request):
@@ -2518,6 +2673,43 @@ def api_system_deals(request):
                         'ticket': getattr(d, 'ticket', None),
                     })
         return JsonResponse({'success': True, 'deals': deals[:500]})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
+
+
+@require_GET
+def api_mt5_quotes(request):
+    """Return current bid quotes for unique symbols from TradingSystem."""
+    try:
+        symbols = list(TradingSystem.objects.values_list('symbol', flat=True).distinct())
+    except Exception:
+        symbols = []
+    quotes = []
+    try:
+        service = MT5Manager.get_default_service()
+        if not service:
+            return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'})
+        if not service.is_connected:
+            if not service.connect():
+                return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'})
+        try:
+            import MetaTrader5 as mt5
+        except Exception:
+            mt5 = None
+        for sym in symbols:
+            try:
+                name = (sym or '').strip()
+                # Ensure symbol is selected/visible in MT5
+                if hasattr(service, '_ensure_symbol'):
+                    resolved = service._ensure_symbol(name)
+                    if resolved:
+                        name = resolved
+                tick = service._get_tick(name) if hasattr(service, '_get_tick') else (mt5.symbol_info_tick(name) if mt5 else None)
+                bid = float(getattr(tick, 'bid', 0) or 0) if tick else None
+            except Exception:
+                bid = None
+            quotes.append({'symbol': sym, 'bid': bid})
+        return JsonResponse({'success': True, 'quotes': quotes})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)})
 

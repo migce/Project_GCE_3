@@ -84,6 +84,17 @@
     var btn = document.getElementById('runBtn');
     if(btn){ btn.disabled = !!running; }
   }
+  // Preselect system from query string if provided
+  (function(){
+    try{
+      const params = new URLSearchParams(window.location.search||'');
+      const sys = params.get('system');
+      if(sys){
+        const sel = document.getElementById('fSystem');
+        if(sel){ sel.value = String(sys); }
+      }
+    }catch(e){}
+  })();
   function setRunProgress(pct, label){
     var fill = document.getElementById('runProgressFill');
     if(fill){ fill.style.width = Math.max(0, Math.min(100, (pct||0))) + '%'; }

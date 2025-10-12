@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Optional
 from django.utils import timezone
+from datetime import timedelta
 from django.conf import settings as django_settings
 
 from ..models import TradingSystem, SignalEvent
@@ -20,6 +21,7 @@ class SystemTrader:
         self._active = False
         self._thread: Optional[threading.Thread] = None
         self._interval = max(1, int(interval_seconds))
+        self._svc = None  # persistent MT5 service for the worker
 
     def start(self):
         if self._thread is None or not self._thread.is_alive():
@@ -47,34 +49,41 @@ class SystemTrader:
         systems = list(TradingSystem.objects.filter(is_active=True, trading_enabled=True))
         if not systems:
             return
-        # Use default MT5 service
-        service = MT5Manager.get_default_service()
+        # Use persistent default MT5 service
+        if self._svc is None:
+            self._svc = MT5Manager.get_default_service()
+        service = self._svc
         if not service:
             return
-        with service as svc:
-            if not svc.is_connected:
+        # ensure connected but do not disconnect at the end
+        if not service.is_connected:
+            try:
+                if not service.connect():
+                    return
+            except Exception:
                 return
-            now = timezone.now()
-            max_age_sec = int(getattr(django_settings, 'SYSTEM_TRADER_MAX_SIGNAL_AGE_SECONDS', 120))
-            for sys in systems:
-                # Execute only fresh signals to avoid backfilling upon enabling trading
-                since_cfg = now - timezone.timedelta(seconds=max(10, max_age_sec))
-                # When trading has just been enabled, ignore all older signals
-                try:
-                    since_enabled = getattr(sys, 'updated_at', None) or since_cfg
-                    if since_enabled and since_enabled > since_cfg:
-                        since = since_enabled
-                    else:
-                        since = since_cfg
-                except Exception:
+        svc = service
+        now = timezone.now()
+        max_age_sec = int(getattr(django_settings, 'SYSTEM_TRADER_MAX_SIGNAL_AGE_SECONDS', 120))
+        for sys in systems:
+            # Execute only fresh signals to avoid backfilling upon enabling trading
+            since_cfg = now - timedelta(seconds=max(10, max_age_sec))
+            # When trading has just been enabled, ignore all older signals
+            try:
+                since_enabled = getattr(sys, 'updated_at', None) or since_cfg
+                if since_enabled and since_enabled > since_cfg:
+                    since = since_enabled
+                else:
                     since = since_cfg
-                sigs = SignalEvent.objects.filter(
-                    trading_system=sys, event_time__gte=since
-                ).order_by('event_time', 'action')[:200]
-                for s in sigs:
-                    if SignalExecutionLog.objects.filter(signal=s).exists():
-                        continue
-                    self._execute_signal(svc, sys, s)
+            except Exception:
+                since = since_cfg
+            sigs = SignalEvent.objects.filter(
+                trading_system=sys, event_time__gte=since
+            ).order_by('event_time', 'action')[:200]
+            for s in sigs:
+                if SignalExecutionLog.objects.filter(signal=s).exists():
+                    continue
+                self._execute_signal(svc, sys, s)
 
     def _execute_signal(self, svc, sys: TradingSystem, sig: SignalEvent):
         ok = False

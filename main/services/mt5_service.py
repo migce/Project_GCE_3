@@ -245,9 +245,11 @@ class MT5Service:
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Автоматическое отключение при выходе из контекста"""
-        if self.is_connected:
-            self.disconnect()
+        """На выходе из контекста оставляем соединение открытым.
+        Отключение управляется вызывающей стороной/пулом, чтобы избежать
+        глобальных shutdown при параллельной работе потоков (WS, мониторинг).
+        """
+        return False
     
     def get_balance(self) -> Optional[float]:
         """
@@ -438,6 +440,20 @@ class MT5Service:
                     if n.startswith(target):
                         mt5.symbol_select(s.name, True)
                         return s.name
+                # Fallback: normalize (drop non-alnum) and compare
+                def _norm(x: str) -> str:
+                    try:
+                        return ''.join(ch for ch in (x or '') if ch.isalnum()).upper()
+                    except Exception:
+                        return (x or '').upper()
+                norm_target = _norm(symbol)
+                for s in allsyms:
+                    if _norm(getattr(s, 'name', '')) == norm_target:
+                        try:
+                            mt5.symbol_select(s.name, True)
+                        except Exception:
+                            pass
+                        return s.name
             return None
         except Exception:
             return None
@@ -447,6 +463,36 @@ class MT5Service:
             return mt5.symbol_info_tick(symbol)
         except Exception:
             return None
+
+    def get_symbol_bid(self, symbol: str) -> Optional[float]:
+        """Return best-effort Bid price for symbol.
+
+        Attempts in order:
+        - Ensure symbol is visible/selected, resolving broker-specific name
+        - Use symbol_info_tick().bid when available
+        - Fallback to symbol_info_double(SYMBOL_BID) which often returns last known price
+        """
+        try:
+            sym = self._ensure_symbol(symbol) or symbol
+        except Exception:
+            sym = symbol
+        # Try live tick first
+        try:
+            t = self._get_tick(sym)
+            if t is not None:
+                b = getattr(t, 'bid', None)
+                if b is not None and float(b) != 0:
+                    return float(b)
+        except Exception:
+            pass
+        # Fallback to last known bid from symbol_info
+        try:
+            b2 = mt5.symbol_info_double(sym, getattr(mt5, 'SYMBOL_BID', 1))
+            if b2 is not None and float(b2) != 0:
+                return float(b2)
+        except Exception:
+            pass
+        return None
 
     def _filling_candidates(self, symbol: str) -> List[int]:
         cands: List[int] = []

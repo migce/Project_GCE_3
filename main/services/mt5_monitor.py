@@ -35,6 +35,7 @@ class MT5ConnectionMonitor:
         self.monitoring_active = False
         self.monitor_thread = None
         self.reconnect_attempts = {}  # Track reconnection attempts per connection
+        self._svc_map = {}
     
     def start_monitoring(self):
         """Start the monitoring service"""
@@ -100,10 +101,14 @@ class MT5ConnectionMonitor:
         start_time = time.time()
         
         try:
-            service = MT5Service(connection)
-            
-            # Attempt connection
-            is_connected = service.connect()
+            # Reuse persistent service per connection to avoid churn
+            service = self._svc_map.get(connection.id)
+            if service is None:
+                service = MT5Service(connection)
+                self._svc_map[connection.id] = service
+
+            # Attempt connection (no-op if already connected)
+            is_connected = service.is_connected or service.connect()
             ping_ms = int((time.time() - start_time) * 1000)
             
             health_record = MT5ConnectionHealth(
@@ -130,8 +135,8 @@ class MT5ConnectionMonitor:
                 # Reset reconnection attempts counter
                 self.reconnect_attempts[connection.id] = 0
                 
-                service.disconnect()
-                logger.debug(f"Health check OK for {connection.name}: {ping_ms}ms")
+                # Keep connection open; do not disconnect to avoid global shutdown
+                logger.debug(f"Health check OK for {connection.name}: {ping_ms}ms (connected={service.is_connected})")
                 
             else:
                 # Connection failed
@@ -239,8 +244,9 @@ class MT5ConnectionMonitor:
         logger.info(f"Attempting reconnection {self.reconnect_attempts[connection_id]}/{monitoring_settings.max_reconnect_attempts} for {connection.name}")
         
         try:
-            service = MT5Service(connection)
-            if service.connect():
+            service = self._svc_map.get(connection.id) or MT5Service(connection)
+            self._svc_map[connection.id] = service
+            if service.is_connected or service.connect():
                 logger.info(f"Reconnection successful for {connection.name}")
                 
                 # Update connection data
@@ -251,7 +257,7 @@ class MT5ConnectionMonitor:
                     connection.last_connection_time = timezone.now()
                     connection.save()
                 
-                service.disconnect()
+                # Keep connection open
                 
                 # Reset attempts counter on success
                 self.reconnect_attempts[connection_id] = 0
