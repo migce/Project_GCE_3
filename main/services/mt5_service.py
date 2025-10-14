@@ -309,6 +309,12 @@ class MT5Service:
 
         try:
             positions = mt5.positions_get()
+            # Broker/server timezone offset (seconds) if available
+            try:
+                _ti = mt5.terminal_info()
+                tz_offset_sec = int(getattr(_ti, 'timezone', 0) or 0)
+            except Exception:
+                tz_offset_sec = 0
             result: List[Dict[str, Any]] = []
             if not positions:
                 return result
@@ -321,12 +327,30 @@ class MT5Service:
                     pos_type = str(getattr(p, 'type', ''))
 
                 opened_ts = getattr(p, 'time', None)
-                opened_at = None
+                opened_at_iso = None
+                opened_ts_int = None
+                opened_local_str = None
                 if opened_ts:
                     try:
-                        opened_at = datetime.fromtimestamp(opened_ts)
+                        opened_ts_int = int(opened_ts)
                     except Exception:
-                        opened_at = None
+                        opened_ts_int = None
+                    try:
+                        opened_at_iso = datetime.utcfromtimestamp(int(opened_ts)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    except Exception:
+                        opened_at_iso = None
+                    try:
+                        opened_local_str = datetime.fromtimestamp(int(opened_ts)).strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        opened_local_str = None
+                    # Broker/server time string using terminal timezone offset, if provided
+                    try:
+                        if opened_ts_int is not None:
+                            opened_broker_str = datetime.utcfromtimestamp(opened_ts_int + tz_offset_sec).strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            opened_broker_str = None
+                    except Exception:
+                        opened_broker_str = None
 
                 result.append({
                     'ticket': getattr(p, 'ticket', None),
@@ -342,7 +366,11 @@ class MT5Service:
                     'commission': float(getattr(p, 'commission', 0) or 0) if hasattr(p, 'commission') else None,
                     'comment': getattr(p, 'comment', ''),
                     'magic': getattr(p, 'magic', None),
-                    'time': opened_at,
+                    # Provide both UTC ISO and unix seconds; UI prefers unix for reliable local rendering
+                    'time': opened_at_iso,
+                    'time_ts': opened_ts_int,
+                    'time_local': opened_local_str,
+                    'time_broker': opened_broker_str,
                 })
 
             return result

@@ -36,9 +36,43 @@ SECRET_KEY = 'django-insecure-ahpth=)kw*yhirtcd-9+(%+rf)e^ks_p2wwxxp0^sm+gkh$=i+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
+# Allowed hosts for incoming HTTP requests
 ALLOWED_HOSTS = [
-    '127.0.0.1', 'localhost'
+    '127.0.0.1', 'localhost', '192.168.2.137', '5.188.100.91',
+    'gp.gcestation.netcraze.pro',
+    '.keenetic.io',
+    '.trycloudflare.com',
+    'gceproject.app', 'www.gceproject.app',
 ]
+
+# Optional: allow all hosts when env is set (useful for tunnels/tests)
+import os as _os
+if _os.environ.get('DJANGO_ALLOW_ALL_HOSTS', '').lower() in ('1', 'true', 'yes'):
+    ALLOWED_HOSTS = ['*']
+
+# CSRF: trust local LAN origin(s) for forms/POSTs
+CSRF_TRUSTED_ORIGINS = [
+    'http://192.168.2.137',
+    'http://192.168.2.137:8000',
+    'http://192.168.2.137:8001',
+    'https://192.168.2.137',
+    'http://5.188.100.91',
+    'http://5.188.100.91:8000',
+    'http://5.188.100.91:8001',
+    'https://5.188.100.91',
+    'http://gp.gcestation.netcraze.pro',
+    'https://gp.gcestation.netcraze.pro',
+    'http://*.keenetic.io',
+    'https://*.keenetic.io',
+    'http://*.trycloudflare.com',
+    'https://*.trycloudflare.com',
+    'https://gceproject.app',
+    'https://www.gceproject.app',
+]
+
+# If HTTPS is terminated at the router/proxy (KeenDNS), honor X-Forwarded-Proto
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
 
 
 # Application definition
@@ -62,6 +96,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'main.middleware.LoginRequiredMiddleware',
 ]
 
 ROOT_URLCONF = 'gce_project.urls'
@@ -98,6 +133,10 @@ CHANNEL_LAYERS = {
 AUTOSTART_GLOBAL_INGESTION = os.environ.get('AUTOSTART_GLOBAL_INGESTION', 'true').lower() == 'true'
 AUTOSTART_MT5_MONITORING = os.environ.get('AUTOSTART_MT5_MONITORING', 'true').lower() == 'true'
 AUTOSTART_SYSTEM_TRADER = os.environ.get('AUTOSTART_SYSTEM_TRADER', 'true').lower() == 'true'
+
+# Authentication redirects
+LOGIN_URL = 'main:login'
+LOGIN_REDIRECT_URL = 'main:home'
 
 
 # Database

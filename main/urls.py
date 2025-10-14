@@ -1,10 +1,14 @@
 from django.urls import path
 from . import views
+from django.contrib.auth import views as auth_views
 
 app_name = 'main'
 
 urlpatterns = [
     path('', views.home, name='home'),
+    # Auth
+    path('auth/login/', auth_views.LoginView.as_view(template_name='main/login.html'), name='login'),
+    path('auth/logout/', views.logout_view, name='logout'),
     path('algo-trading/', views.algo_trading, name='algo_trading'),
     path('manual-trading/', views.manual_trading, name='manual_trading'),
     # Async Trading History entry page with progress bar
@@ -46,4 +50,5 @@ urlpatterns = [
     path('api/mt5/open_positions/', views.api_mt5_open_positions, name='api_mt5_open_positions'),
     path('api/mt5/open_positions/stream/', views.api_mt5_open_positions_stream, name='api_mt5_open_positions_stream'),
     path('api/mt5/quotes/', views.api_mt5_quotes, name='api_mt5_quotes'),
+    path('api/mt5/ohlc/', views.api_mt5_ohlc, name='api_mt5_ohlc'),
 ]

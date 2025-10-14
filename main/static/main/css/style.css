@@ -838,6 +838,7 @@ body {
 .spark-overlay.all { stroke:#1f2d5a; }
 .spark-overlay.buy { stroke:#166534; }
 .spark-overlay.sell { stroke:#991b1b; }
+.qchart .spark { display:block; width:100%; height:36px; }
 
 /* Price chart (base TF) */
 .price-svg .bar { stroke:#9aa0a6; stroke-width:1; }

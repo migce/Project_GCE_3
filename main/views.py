@@ -107,6 +107,23 @@ def trading_history_async(request):
     systems = TradingSystem.objects.all().order_by('system_sid')
     return render(request, 'main/trading_history_async.html', {'systems': systems})
 
+from django.contrib.auth import logout
+from django.shortcuts import redirect
+
+def logout_view(request):
+    """Log out on POST or GET, then redirect to login.
+
+    Django 5's LogoutView enforces POST; accept GET here for convenience.
+    """
+    try:
+        logout(request)
+    finally:
+        try:
+            from django.urls import reverse
+            return redirect(reverse('main:login'))
+        except Exception:
+            return redirect('/auth/login/')
+
 def system_dashboard(request):
     """Системный дашборд с мониторингом MT5"""
     
@@ -2585,40 +2602,48 @@ def api_mt5_open_positions_stream(request):
             symbols = list(TradingSystem.objects.values_list('symbol', flat=True).distinct())
         except Exception:
             symbols = []
-        for _ in range(max_iters):
-            payload = {}
-            try:
-                if not service.is_connected:
-                    if not service.connect():
-                        payload = {'success': False, 'message': 'Failed to connect to MT5'}
-                    else:
-                        payload = {'success': True}
-                rows = service.get_open_positions() if service.is_connected else []
-                norm = []
-                for p in rows or []:
-                    q = dict(p)
-                    t = q.get('time')
-                    try:
-                        if hasattr(t, 'strftime'):
-                            q['time'] = t.strftime('%Y-%m-%d %H:%M:%S')
-                    except Exception:
-                        pass
-                    norm.append(q)
-                quotes = []
-                for sym in symbols:
-                    try:
-                        bid = service.get_symbol_bid(sym) if hasattr(service, 'get_symbol_bid') else None
-                    except Exception:
-                        bid = None
-                    quotes.append({'symbol': sym, 'bid': bid})
-                payload = {'success': True, 'positions': norm, 'quotes': quotes}
-            except Exception as e:
-                payload = {'success': False, 'message': str(e)}
-            data = json.dumps(payload, default=str)
-            yield f"event: positions\ndata: {data}\n\n"
-            time.sleep(2)
+        try:
+            for _ in range(max_iters):
+                payload = {}
+                try:
+                    if not service.is_connected:
+                        if not service.connect():
+                            payload = {'success': False, 'message': 'Failed to connect to MT5'}
+                        else:
+                            payload = {'success': True}
+                    rows = service.get_open_positions() if service.is_connected else []
+                    norm = []
+                    for p in rows or []:
+                        q = dict(p)
+                        t = q.get('time')
+                        try:
+                            if hasattr(t, 'strftime'):
+                                q['time'] = t.strftime('%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            pass
+                        norm.append(q)
+                    quotes = []
+                    for sym in symbols:
+                        try:
+                            bid = service.get_symbol_bid(sym) if hasattr(service, 'get_symbol_bid') else None
+                        except Exception:
+                            bid = None
+                        quotes.append({'symbol': sym, 'bid': bid})
+                    payload = {'success': True, 'positions': norm, 'quotes': quotes}
+                except Exception as e:
+                    payload = {'success': False, 'message': str(e)}
+                data = json.dumps(payload, default=str)
+                yield f"event: positions\ndata: {data}\n\n"
+                # Sleep in short chunks so generator can be closed promptly on client disconnect
+                for __ in range(20):
+                    time.sleep(0.1)
+        except GeneratorExit:
+            # Client disconnected: exit quickly to avoid Daphne kill warnings
+            return
     resp = StreamingHttpResponse(gen(), content_type='text/event-stream')
     resp['Cache-Control'] = 'no-cache'
+    resp['Connection'] = 'keep-alive'
+    resp['X-Accel-Buffering'] = 'no'
     return resp
 
 @require_GET
@@ -2710,6 +2735,80 @@ def api_mt5_quotes(request):
                 bid = None
             quotes.append({'symbol': sym, 'bid': bid})
         return JsonResponse({'success': True, 'quotes': quotes})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
+
+@require_GET
+def api_mt5_ohlc(request):
+    """Return OHLC closes for a symbol from MT5.
+
+    Query params:
+      - symbol: string (required)
+      - days: int (default 5)
+      - tf: timeframe code, only 'H1' supported currently
+    Response: { success, symbol, times: [iso], closes: [float] }
+    """
+    sym = (request.GET.get('symbol') or '').strip()
+    if not sym:
+        return JsonResponse({'success': False, 'message': 'symbol required'}, status=400)
+    try:
+        days = int(request.GET.get('days') or 5)
+        days = max(1, min(days, 30))
+    except Exception:
+        days = 5
+    tf = (request.GET.get('tf') or 'H1').upper()
+    try:
+        service = MT5Manager.get_default_service()
+        if not service:
+            return JsonResponse({'success': False, 'message': 'Default MT5 settings not configured'})
+        if not service.is_connected:
+            if not service.connect():
+                return JsonResponse({'success': False, 'message': 'Failed to connect to MT5'})
+        import MetaTrader5 as mt5
+        resolved = getattr(service, '_ensure_symbol', lambda s: s)(sym) or sym
+        tf_const = getattr(mt5, 'TIMEFRAME_H1', 16388)
+        from datetime import datetime, timedelta
+        to = datetime.utcnow()
+        frm = to - timedelta(days=days + 1)
+        # Strategy: try from-date + count (most brokers return this reliably)
+        rates = mt5.copy_rates_from(resolved, tf_const, frm, 500) or []
+        # Fallbacks
+        if not rates:
+            rates = mt5.copy_rates_range(resolved, tf_const, frm, to) or []
+        if not rates:
+            try:
+                rates = mt5.copy_rates_from_pos(resolved, tf_const, 0, 500) or []
+            except Exception:
+                rates = []
+        times = []
+        closes = []
+        for r in rates:
+            t = None; c = None
+            try:
+                t = getattr(r, 'time', None); c = getattr(r, 'close', None)
+            except Exception:
+                pass
+            if (t is None or c is None) and isinstance(r, dict):
+                t = r.get('time', t); c = r.get('close', c)
+            # numpy record support
+            if (t is None or c is None):
+                try:
+                    t = r['time'] if t is None else t
+                    c = r['close'] if c is None else c
+                except Exception:
+                    pass
+            if t is None or c is None:
+                continue
+            try:
+                from datetime import datetime as _dt
+                times.append(_dt.utcfromtimestamp(int(t)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+            except Exception:
+                times.append(str(t))
+            try:
+                closes.append(float(c))
+            except Exception:
+                pass
+        return JsonResponse({'success': True, 'symbol': resolved, 'times': times, 'closes': closes})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)})
 

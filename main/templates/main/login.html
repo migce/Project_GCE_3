@@ -1,0 +1,47 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in · Project GCE 3</title>
+    <link rel="stylesheet" href="{% static 'main/css/style.css' %}">
+    <style>
+      body { display:flex; align-items:center; justify-content:center; min-height:100vh; background:#f3f4f6; }
+      .login-card { width:min(440px, 92vw); background:#fff; border:1px solid #e6e9ee; border-radius:12px; box-shadow: 0 6px 20px rgba(0,0,0,.08); padding:20px; }
+      .login-title { margin:0 0 6px; font-size:1.4rem; color:#111827; }
+      .login-sub { color:#6b7280; margin-bottom: 14px; }
+      .login-form label { display:block; font-size:.9rem; color:#374151; margin:10px 0 4px; }
+      .login-form input[type=text], .login-form input[type=password] {
+        width:100%; height:40px; padding:8px 10px; border:1px solid #cbd5e1; border-radius:6px; background:#fff;
+      }
+      .login-actions { display:flex; align-items:center; justify-content:space-between; margin-top:14px; }
+      .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:#fff; border: none; padding:.55rem .95rem; border-radius:8px; font-weight:600; cursor:pointer; }
+      .btn-primary:hover { filter: brightness(1.05); }
+      .hint { font-size:.85rem; color:#6b7280; margin-top:8px; }
+      .errorlist { list-style:none; padding:0; margin:0 0 8px; color:#b91c1c; font-size:.9rem; }
+    </style>
+  </head>
+  <body>
+    <div class="login-card">
+      <h1 class="login-title">Welcome back</h1>
+      <div class="login-sub">Sign in to Project GCE 3</div>
+      {% if form.non_field_errors %}
+        <ul class="errorlist">{% for e in form.non_field_errors %}<li>{{ e }}</li>{% endfor %}</ul>
+      {% endif %}
+      <form method="post" class="login-form">
+        {% csrf_token %}
+        <label for="id_username">Username</label>
+        {{ form.username }}
+        <label for="id_password">Password</label>
+        {{ form.password }}
+        <div class="login-actions">
+          <div class="hint">Use your site credentials</div>
+          <button type="submit" class="btn btn-primary">Sign in</button>
+        </div>
+        {% if next %}<input type="hidden" name="next" value="{{ next }}" />{% endif %}
+      </form>
+    </div>
+  </body>
+  </html>
+

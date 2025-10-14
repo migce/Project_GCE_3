@@ -35,9 +35,9 @@
     <table class="table">
       <thead>
         <tr style="background:#f8f9fa;">
-          <th style="width:30%;">Symbol</th>
-          <th style="width:20%;">Bid</th>
-          <th></th>
+          <th style="width:22%;">Symbol</th>
+          <th style="width:16%;">Bid</th>
+          <th style="width:62%;">Chart (H1 · 5d)</th>
         </tr>
       </thead>
       <tbody id="algoQuotesBody">
@@ -71,6 +71,9 @@
   </div>
 <script>
 var CONN_MAP = {};
+const SYSTEM_SYMBOLS = [
+  {% for s in systems %}'{{ s.symbol|escapejs }}'{% if not forloop.last %}, {% endif %}{% endfor %}
+];
 function setRT(mode, isOk){
   var el = document.getElementById('rtMode');
   if(!el) return;
@@ -121,15 +124,56 @@ function loadAccount(){
 }
 function format5(v){ return (v==null? '-' : Number(v).toFixed(5)); }
 function format2(v){ return (v==null? '-' : ('$'+Number(v).toFixed(2))); }
+function normSym(s){ return String(s||'').trim().toUpperCase(); }
+function initQuotesTable(){
+  const body=document.getElementById('algoQuotesBody'); if(!body) return;
+  const base = Array.from(new Set((SYSTEM_SYMBOLS||[]).map(normSym).filter(Boolean)));
+  if(!base.length){ body.innerHTML = '<tr><td colspan="3" style="text-align:center; color:#6c757d;">No symbols</td></tr>'; return; }
+  body.innerHTML = base.map(sym=> '<tr data-sym="'+sym+'"><td>'+sym+'</td><td class="qbid">-</td><td class="qchart"><svg class="spark" width="100%" height="36"></svg></td></tr>').join('');
+}
 function renderQuotes(quotes){
   const body=document.getElementById('algoQuotesBody'); if(!body) return;
+  if(!body.querySelector('tr[data-sym]')){ initQuotesTable(); }
   const rows = Array.isArray(quotes)? quotes : [];
-  if(!rows.length){ body.innerHTML = '<tr><td colspan="3" style="text-align:center; color:#6c757d;">No quotes</td></tr>'; return; }
-  body.innerHTML = rows.map(q=>{
-    const sym = q.symbol || '';
-    const bid = (q.bid!=null? Number(q.bid).toFixed(5) : '-');
-    return '<tr><td>'+sym+'</td><td>'+bid+'</td><td></td></tr>';
-  }).join('');
+  const map = {};
+  rows.forEach(q=>{ const sym=normSym(q.symbol); if(sym){ map[sym] = (q.bid!=null? Number(q.bid): null); } });
+  // Update existing rows
+  body.querySelectorAll('tr[data-sym]').forEach(tr=>{
+    const sym = normSym(tr.getAttribute('data-sym'));
+    const v = map[sym];
+    const td = tr.querySelector('.qbid');
+    if(td){ td.textContent = (v!=null? Number(v).toFixed(5) : '-'); }
+  });
+  // Append any new symbols from quotes not in base list
+  rows.forEach(q=>{
+    const key = normSym(q.symbol);
+    if(key && !body.querySelector('tr[data-sym="'+key+'"]')){
+      const tr = document.createElement('tr');
+      tr.setAttribute('data-sym', key);
+      tr.innerHTML = '<td>'+ key +'</td><td class="qbid">'+ (q.bid!=null? Number(q.bid).toFixed(5): '-') +'</td><td class="qchart"><svg class="spark" width="100%" height="36"></svg></td>';
+      body.appendChild(tr);
+    }
+  });
+}
+
+async function loadChartFor(sym){
+  try{
+    const r = await fetch('{% url "main:api_mt5_ohlc" %}?symbol='+encodeURIComponent(sym)+'&tf=H1&days=5');
+    const d = await r.json();
+    if(!d || !d.success) return;
+    const tr = document.querySelector('tr[data-sym="'+normSym(sym)+'"]');
+    if(!tr) return;
+    const svg = tr.querySelector('.qchart .spark'); if(!svg) return;
+    const w = (svg.clientWidth && svg.clientWidth>0)? svg.clientWidth : 300; const h = 36; const pad = 2;
+    const xs = (d.closes||[]).map(Number).filter(v => isFinite(v));
+    if(!xs.length){ svg.innerHTML=''; return; }
+    const min = Math.min.apply(null, xs); const max = Math.max.apply(null, xs);
+    const n = xs.length; const dx = (w - pad*2) / Math.max(1, n-1);
+    const scaleY = (v)=>{ if(max===min) return h/2; return h - pad - (v-min)*(h-pad*2)/(max-min); };
+    let p = ''; for(let i=0;i<n;i++){ const x=pad + i*dx; const y = scaleY(xs[i]); p += (i? ' L':'M')+x.toFixed(1)+' '+y.toFixed(1); }
+    svg.setAttribute('viewBox', '0 0 '+w+' '+h);
+    svg.innerHTML = '<path d="'+p+'" class="spark-line all" stroke="#1f2d5a" fill="none" stroke-width="1.5" />';
+  }catch(e){ /* ignore */ }
 }
 function applyPositions(d){
   const body=document.getElementById('algoOpenPositions'); if(!body) return;
@@ -142,9 +186,28 @@ function applyPositions(d){
         document.querySelectorAll('tr[data-id] .st-open').forEach(el=>{ el.textContent='-'; });
         return;
       }
+      function fmtTime(p){
+        // Prefer raw epoch seconds to avoid double timezone shifting
+        try{
+          // If broker/server time string is provided, show it as-is
+          if(p.time_broker){ return String(p.time_broker); }
+          if(p.time_ts != null && p.time_ts !== undefined){
+            const ts = Number(p.time_ts);
+            if(!Number.isNaN(ts)) return new Date(ts * 1000).toLocaleString();
+          }
+          // Fallbacks: ISO strings
+          const s = p.time || p.time_local;
+          if(!s) return '-';
+          const str = String(s);
+          // If string already contains TZ (Z or ±hh:mm) rely on it
+          if(/Z$/.test(str) || /([+-]\d{2}:?\d{2})$/.test(str)) return new Date(str).toLocaleString();
+          // Treat unknown strings as UTC to avoid extra local shift
+          return new Date(str.replace(' ', 'T') + 'Z').toLocaleString();
+        }catch(e){ return '-'; }
+      }
       body.innerHTML = rows.map(p=>{
         const profit = (p.profit!=null? ('$'+Number(p.profit).toFixed(2)):'-');
-        const t = p.time? new Date(p.time).toLocaleString():'-';
+        const t = fmtTime(p);
         return '<tr>'+
           '<td>'+ (p.ticket||'') +'</td>'+
           '<td>'+ (p.symbol||'') +'</td>'+
@@ -204,27 +267,23 @@ function algoClose(ticket){ if(!ticket) return; fetch('{% url "main:mt5_close_po
 document.addEventListener('DOMContentLoaded', function(){
   loadConnections();
   const sel=document.getElementById('mt5ConnSelect'); if(sel){ sel.addEventListener('change', function(){ loadAccount(); }); }
+  initQuotesTable();
+  // load charts for each system symbol (uppercased)
+  (SYSTEM_SYMBOLS||[]).forEach(s=>{ const k = normSym(s); if(k) setTimeout(()=>loadChartFor(k), 0); });
   // WebSocket realtime; fallback to SSE, then polling
   const startPolling = () => { setRT('Polling'); refreshPositions(); setInterval(refreshPositions, 10000); };
-  const startSse = () => {
-    try{
-      if(!window.EventSource) return startPolling();
-      const es = new EventSource('{% url "main:api_mt5_open_positions_stream" %}');
-      es.onopen = function(){ setRT('SSE'); };
-      es.addEventListener('positions', function(ev){
-        try{ const d = JSON.parse(ev.data||'{}'); applyPositions(d); }catch(e){}
-      });
-      es.onerror = function(){ /* browser will reconnect */ };
-    }catch(e){ startPolling(); }
-  };
+  // Disable SSE fallback to avoid long-lived server streams on some proxies
+  const ENABLE_SSE = false;
+  const startSse = () => { return startPolling(); };
   const startWs = () => {
     try{
       const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
-      // Prefer dedicated WS port 8001 (Daphne), fall back to current port
+      // Prefer same-origin WS (works through reverse proxies like KeenDNS)
+      const urlPrimary = `${proto}://${location.host}/ws/mt5/open_positions/`;
+      // Fallback to dedicated WS port if available locally
       const WS_PORT = '8001';
       const hostPref = `${location.hostname}:${WS_PORT}`;
-      const urlPrimary = `${proto}://${hostPref}/ws/mt5/open_positions/`;
-      const urlFallback = `${proto}://${location.host}/ws/mt5/open_positions/`;
+      const urlFallback = `${proto}://${hostPref}/ws/mt5/open_positions/`;
       let triedFallback = false;
       const connect = (u) => {
         const ws = new WebSocket(u);
@@ -234,8 +293,9 @@ document.addEventListener('DOMContentLoaded', function(){
           try{ const d = JSON.parse(ev.data||'{}'); applyPositions(d); }catch(e){}
         };
         ws.onclose = () => {
-          if(!triedFallback && u !== urlFallback){ triedFallback = true; setRT('SSE…', false); connect(urlFallback); return; }
-          setTimeout(startSse, 1000);
+          if(!triedFallback && u !== urlFallback){ triedFallback = true; setRT('WS→fallback', false); connect(urlFallback); return; }
+          // Fall back to polling (not SSE) to prevent server-side hanging streams
+          setTimeout(startPolling, 500);
         };
         ws.onerror = () => { setRT('WS error', false); try{ ws.close(); }catch(_){} };
       };
