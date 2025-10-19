@@ -1421,6 +1421,42 @@ def api_ts_sim_result(request):
     return JsonResponse({'success': True, 'result': job.result})
 
 
+@require_http_methods(["POST"])
+def api_ts_regenerate_signals(request):
+    try:
+        system_id = int(request.POST.get('system') or request.POST.get('system_id'))
+    except Exception:
+        return JsonResponse({'success': False, 'message': 'Invalid system id'}, status=400)
+    try:
+        system = TradingSystem.objects.get(id=system_id)
+    except TradingSystem.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'System not found'}, status=404)
+    # Compute window size: all bars on base feed
+    try:
+        base_level = getattr(system.signal_settings, 'signal_base_tf_level', None) or 1
+    except Exception:
+        base_level = 1
+    try:
+        bind = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+        limit = MarketBar.objects.filter(feed=bind.feed).count() if bind else 0
+    except Exception:
+        limit = 0
+    try:
+        from .services.signal_engine import generate_signals_for_system
+        from django.db import transaction
+        # Generate fresh events
+        events = generate_signals_for_system(system, limit_bars=max(0, limit))
+        saved = 0
+        with transaction.atomic():
+            SignalEvent.objects.filter(trading_system=system).delete()
+            if events:
+                SignalEvent.objects.bulk_create(events, batch_size=1000)
+                saved = len(events)
+        return JsonResponse({'success': True, 'saved': saved})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
 def start_ingestion_service(request):
     if request.method == 'POST':
         try:

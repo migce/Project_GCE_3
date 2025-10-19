@@ -41,6 +41,7 @@ urlpatterns = [
     path('api/sim/ts/start/', views.api_ts_sim_start, name='api_ts_sim_start'),
     path('api/sim/ts/status/', views.api_ts_sim_status, name='api_ts_sim_status'),
     path('api/sim/ts/result/', views.api_ts_sim_result, name='api_ts_sim_result'),
+    path('api/sim/ts/regenerate/', views.api_ts_regenerate_signals, name='api_ts_regenerate_signals'),
     # Trading Systems API
     path('api/trading-systems/', views.api_trading_systems, name='api_trading_systems'),
     path('api/trading-systems/<int:system_id>/', views.api_trading_system_detail, name='api_trading_system_detail'),

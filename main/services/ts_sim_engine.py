@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Any, List
 from collections import deque, Counter
+from numbers import Number
 
 from django.utils import timezone
+from django.db.models import Max
 
-from ..models import TradingSystem, TradingSystemTFBinding, MarketBar, SignalEvent
+from ..models import (
+    TradingSystem,
+    TradingSystemTFBinding,
+    MarketBar,
+    SignalEvent,
+    MarketIndicatorDef,
+    MarketIndicatorValue,
+)
 
 
 def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance: float, lot_size: float, progress_cb: Callable[[int, str], None] | None = None, spread_pips: float | None = None) -> Dict[str, Any]:
@@ -315,6 +324,97 @@ def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance:
     kpi_cycle_loss_avg = _avg(losses)
     kpi_cycle_loss_max = (min(losses) if losses else 0.0)
 
+    # Build open positions list from remaining queue and estimate unrealized PnL
+    open_positions: List[Dict[str, Any]] = []
+    try:
+        # Determine current price from the most precise available feed
+        cur_price = None
+        try:
+            # prefer the finest resolution feed among bindings
+            binds_all = list(TradingSystemTFBinding.objects.filter(trading_system=system).select_related('feed__tfcode'))
+            def _rank(b):
+                try:
+                    code = (b.feed.tfcode.code or '').upper()
+                except Exception:
+                    code = ''
+                if code.startswith('T'):
+                    try:
+                        ticks = int(code[1:])
+                    except Exception:
+                        ticks = 10**9
+                    return (0, ticks)
+                try:
+                    mins = int(getattr(b.feed.tfcode, 'minutes', None) or 999999)
+                except Exception:
+                    mins = 999999
+                return (1, mins)
+            use_feed = None
+            if binds_all:
+                binds_all.sort(key=_rank)
+                use_feed = binds_all[0].feed
+            if not use_feed:
+                b0 = TradingSystemTFBinding.objects.filter(trading_system=system, level=base_level).select_related('feed').first()
+                use_feed = getattr(b0, 'feed', None)
+            if use_feed:
+                last_bar = MarketBar.objects.filter(feed=use_feed).only('close').order_by('-dt').first()
+                if last_bar and last_bar.close is not None:
+                    cur_price = float(last_bar.close)
+        except Exception:
+            cur_price = None
+
+        remaining = []
+        for side in ('BUY', 'SELL'):
+            dq = open_q.get(side)
+            if dq:
+                remaining.extend(list(dq))
+        # oldest first
+        remaining.sort(key=lambda ev: getattr(ev, 'event_time', None))
+        for oe in remaining:
+            op = _get_close(oe)
+            op_val = float(op) if op is not None else None
+            unreal = None
+            if cur_price is not None and op_val is not None:
+                if getattr(oe, 'direction', None) == 'BUY':
+                    unreal = (cur_price - op_val) * pip_scale
+                else:
+                    unreal = (op_val - cur_price) * pip_scale
+            open_positions.append({
+                'open_time': getattr(oe, 'event_time', None),
+                'open_dir': getattr(oe, 'direction', None),
+                'open_price': op_val,
+                'cur_price': cur_price,
+                'open_pnl': unreal,
+                'open_id': getattr(oe, 'id', None),
+            })
+    except Exception:
+        open_positions = []
+
+    # Clean rules text from system settings (drop empty/comment lines)
+    rules_clean = ''
+    try:
+        if getattr(system, 'signal_settings', None):
+            raw = getattr(system.signal_settings, 'signal_logic', '') or ''
+            lines = []
+            for ln in (raw.splitlines() if raw else []):
+                s = ln.strip()
+                if not s or s.startswith('#'):
+                    continue
+                lines.append(s)
+            rules_clean = "\n".join(lines)
+    except Exception:
+        rules_clean = ''
+
+    # Staleness: compare rules updated_at vs last signals generation time (created_at)
+    rules_updated_at = None
+    try:
+        rules_updated_at = getattr(getattr(system, 'signal_settings', None), 'updated_at', None)
+    except Exception:
+        rules_updated_at = None
+    try:
+        generated_at = SignalEvent.objects.filter(trading_system=system, level=base_level).aggregate(m=Max('created_at')).get('m')
+    except Exception:
+        generated_at = None
+
     result = {
         'system_id': system.id,
         'system_sid': system.system_sid,
@@ -329,6 +429,9 @@ def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance:
         'events_count': len(evs),
         'events_from_dt': events_from_dt.isoformat() if events_from_dt else None,
         'events_to_dt': events_to_dt.isoformat() if events_to_dt else None,
+        'rules_updated_at': (rules_updated_at.isoformat() if rules_updated_at else None),
+        'signals_generated_at': (generated_at.isoformat() if generated_at else None),
+        'signals_stale': (bool(rules_updated_at and generated_at and (rules_updated_at > generated_at))),
         'kpi_profit_factor': profit_factor,
         'kpi_payoff': payoff,
         'kpi_expectancy': expectancy,
@@ -349,6 +452,9 @@ def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance:
         'kpi_pnl_vs_bh_pct': kpi_pnl_vs_bh_pct,
         'kpi_buy_vs_bh_pct': kpi_buy_vs_bh_pct,
         'kpi_sell_vs_sh_pct': kpi_sell_vs_sh_pct,
+        'open_positions': open_positions,
+        'kpi_open_pnl': sum((p.get('open_pnl') or 0.0) for p in open_positions),
+        'rules_clean': rules_clean,
         'kpi_trades_per_cycle_avg': kpi_trades_per_cycle_avg,
         'kpi_trades_per_cycle_max': kpi_trades_per_cycle_max,
         'kpi_cycle_dist': kpi_cycle_dist,
@@ -452,6 +558,24 @@ def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance:
                         dts.append(dt_local.strftime('%Y-%m-%d %H:%M:%S'))
                     except Exception:
                         dts.append(str(getattr(b, 'dt')))
+                # Build allowed indicator key set from current rules (e.g., NAME[Lk])
+                allowed_keys = set()
+                try:
+                    from .signal_engine import parse_rules, _collect_requirements  # type: ignore
+                except Exception:
+                    parse_rules = None
+                    _collect_requirements = None
+                try:
+                    raw_rules = getattr(getattr(system, 'signal_settings', None), 'signal_logic', '') or ''
+                    if parse_rules and _collect_requirements and raw_rules.strip():
+                        rules_parsed = parse_rules(raw_rules)
+                        req_pairs = list(_collect_requirements(rules_parsed))
+                        for (nm, lv) in req_pairs:
+                            eff = int(lv) if (lv is not None) else int(base_level)
+                            allowed_keys.add(f"{nm}[L{eff}]")
+                except Exception:
+                    allowed_keys = set()
+
                 dt_to_idx = {getattr(b, 'dt'): i for i,b in enumerate(bars)}
                 markers = []
                 for ev in evs:
@@ -466,11 +590,93 @@ def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance:
                         price_val = _to_float(mb.close if action == 'CLOSE' else mb.open)
                         if price_val is None:
                             continue
+                        # serialize indicators snapshot if present on event
+                        raw_ind = getattr(ev, 'ind_values', None)
+                        indicators = {}
+                        if isinstance(raw_ind, dict):
+                            for key, val in raw_ind.items():
+                                key_str = str(key)
+                                # keep only indicators used in current rules
+                                if allowed_keys and key_str not in allowed_keys:
+                                    continue
+                                if isinstance(val, bool):
+                                    indicators[key_str] = bool(val)
+                                elif isinstance(val, int):
+                                    indicators[key_str] = int(val)
+                                elif isinstance(val, Number):
+                                    try:
+                                        indicators[key_str] = float(val)
+                                    except Exception:
+                                        indicators[key_str] = float(val)
+                                else:
+                                    indicators[key_str] = str(val)
                         mtype = 'buy-open' if action == 'OPEN' and direction == 'BUY' else (
                                 'sell-open' if action == 'OPEN' and direction == 'SELL' else (
                                 'buy-close' if action == 'CLOSE' and direction == 'BUY' else (
                                 'sell-close' if action == 'CLOSE' and direction == 'SELL' else 'other')))
-                        markers.append({'idx': idx, 'price': price_val, 'klass': mtype, 'type': f"{direction} {action}".strip()})
+                        markers.append({'idx': idx, 'price': price_val, 'klass': mtype, 'type': f"{direction} {action}".strip(), 'indicators': indicators})
+                # Indicators subplot: collect series used in rules and sample to base bar times
+                inds_payload = []
+                try:
+                    from .signal_engine import parse_rules, _collect_requirements  # type: ignore
+                except Exception:
+                    parse_rules = None
+                    _collect_requirements = None
+                try:
+                    raw_rules = getattr(getattr(system, 'signal_settings', None), 'signal_logic', '') or ''
+                    req = []
+                    if parse_rules and _collect_requirements and raw_rules.strip():
+                        try:
+                            rules_parsed = parse_rules(raw_rules)
+                            req = list(_collect_requirements(rules_parsed))
+                        except Exception:
+                            req = []
+                    feeds_by_level = {base_level: bind.feed}
+                    try:
+                        for bb in TradingSystemTFBinding.objects.filter(trading_system=system).select_related('feed'):
+                            lvlv = int(getattr(bb, 'level', 0) or 0)
+                            if lvlv not in feeds_by_level:
+                                feeds_by_level[lvlv] = bb.feed
+                    except Exception:
+                        pass
+                    from django.utils import timezone as dj_tz
+                    def _norm_dt(dt):
+                        try:
+                            if dj_tz.is_aware(dt):
+                                # normalize to local timezone then drop tzinfo for comparable naive dt
+                                return dj_tz.localtime(dt).replace(tzinfo=None)
+                        except Exception:
+                            pass
+                        return dt
+
+                    # Precompute normalized base bar times for sampling
+                    base_times = [ _norm_dt(getattr(b, 'dt')) for b in bars ]
+
+                    for (iname, lvl) in req:
+                        eff_lvl = int(lvl) if (lvl is not None) else int(base_level)
+                        f = feeds_by_level.get(eff_lvl)
+                        if not f:
+                            continue
+                        idef = MarketIndicatorDef.objects.filter(feed=f, name=iname).first()
+                        if not idef:
+                            continue
+                        vqs = list(MarketIndicatorValue.objects.filter(indicator=idef).select_related('bar').order_by('bar__dt'))
+                        times = [_norm_dt(getattr(v, 'bar').dt) for v in vqs]
+                        vals = [None if getattr(v, 'value', None) is None else float(getattr(v, 'value')) for v in vqs]
+                        out = []
+                        j = 0
+                        m = len(times)
+                        for tb in base_times:
+                            while j + 1 < m and times[j + 1] <= tb:
+                                j += 1
+                            if m == 0:
+                                out.append(None)
+                            else:
+                                out.append(vals[j] if (j < m and times[j] <= tb) else None)
+                        inds_payload.append({'name': iname, 'level': eff_lvl, 'values': [ (None if v is None else float(v)) for v in out ]})
+                except Exception:
+                    inds_payload = []
+
                 pc = {
                     'w': 900,
                     'h': 220,
@@ -484,6 +690,7 @@ def compute_ts_simulation(system: TradingSystem, base_level: int, start_balance:
                     'opens': [f"{(v if v is not None else float('nan')):.6f}" if v is not None else 'nan' for v in opens],
                     'closes': [f"{(v if v is not None else float('nan')):.6f}" if v is not None else 'nan' for v in closes],
                     'markers': markers,
+                    'inds': inds_payload,
                 }
         result['price_chart'] = pc
         if pc and pc.get('dts'):

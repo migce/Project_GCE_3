@@ -35,7 +35,7 @@ rem Extract tunnel ID from config (line starting with 'tunnel:')
 for /f "tokens=2 delims=: " %%A in ('findstr /b /c:"tunnel:" "%CFCONFIG%"') do set TUNNEL_ID=%%A
 set TUNNEL_ID=%TUNNEL_ID: =%
 
-echo Running: %CFEXE% tunnel --config "%CFCONFIG%" --loglevel warn run %TUNNEL_ID%
-%CFEXE% tunnel --config "%CFCONFIG%" --loglevel warn run %TUNNEL_ID%
+echo Running: %CFEXE% tunnel --config "%CFCONFIG%" --protocol http2 --edge-ip-version 4 --loglevel warn run %TUNNEL_ID%
+%CFEXE% tunnel --config "%CFCONFIG%" --protocol http2 --edge-ip-version 4 --loglevel warn run %TUNNEL_ID%
 
 endlocal

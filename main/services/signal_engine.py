@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Iterable, Set
+import re
 
 from django.db.models import Q
 
@@ -122,11 +123,32 @@ class Lexer:
         return self.s[j:self.i]
 
 
+def _normalize_rules_text(text: str) -> str:
+    """Normalize obvious copy/paste artifacts without touching identifiers.
+
+    Safe replacements only: NBSP -> space, Unicode operators (≤ ≥ ≠) to ASCII,
+    Unicode dashes to '-', and collapse repeated whitespace. Do NOT transliterate
+    letters to avoid breaking indicator names.
+    """
+    if not text:
+        return text
+    s = text
+    # NBSP to space
+    s = s.replace('\u00A0', ' ')
+    s = s.replace('≤', '<=').replace('≥', '>=').replace('≠', '!=')
+    s = s.replace('−', '-').replace('–', '-').replace('—', '-')
+    s = s.replace('×', '*').replace('÷', '/')
+    # Collapse only spaces/tabs (keep newlines to preserve separate rules)
+    s = re.sub(r"[\u00A0 \t]+", " ", s)
+    return s
+
+
 def parse_rules(text: str) -> List[Rule]:
     """Parse multi-line rules. Supports full-line comments starting with #.
 
     A line is ignored if, after trimming whitespace, it is empty or starts with '#'.
     """
+    text = _normalize_rules_text(text)
     lines: List[str] = []
     for ln in text.splitlines():
         s = ln.strip()
@@ -720,10 +742,16 @@ def _generate_signals_global(system: TradingSystem, settings: TradingSystemSigna
                     # even if an OPEN was generated earlier on this same bar.
                     if act_kind == 'CLOSE' and pos_count_start.get(direction, 0) <= 0:
                         continue
-                    # Snapshot indicator values used for this decision
+                    # Snapshot indicator values for only those used in this rule
                     snapshot: Dict[str, Optional[int]] = {}
-                    for name, lvl in normalized_req:
-                        eff = lvl
+                    try:
+                        rule_req = _collect_requirements([r])
+                    except Exception:
+                        rule_req = set()
+                    if not rule_req:
+                        rule_req = set()
+                    for name, lvl in rule_req:
+                        eff = (lvl or base_level)
                         key = f"{name}[L{eff}]"
                         if eff == base_level:
                             snapshot[key] = base_hist.get(name, [None])[-1]

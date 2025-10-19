@@ -165,6 +165,14 @@
     setRunProgress(100, 'Completed');
     qs('progressMsg').textContent = 'Completed';
     const r = res.result || {};
+    // Notices area: no signals and stale warnings
+    const notices = document.createElement('div');
+    function addNotice(html, kind){
+      const box = document.createElement('div');
+      box.className = 'alert ' + (kind||'');
+      box.innerHTML = html;
+      notices.appendChild(box);
+    }
     const kp = document.createElement('div');
     kp.innerHTML = `
       <div class="kpi-table-wrap">
@@ -301,6 +309,7 @@
       const chart = document.createElement('div');
       chart.className = 'card card-flat price-chart-block';
       const markersJson = JSON.stringify(pc.markers||[]).replaceAll('<','&lt;');
+      const indsJson = JSON.stringify(pc.inds||[]).replaceAll('<','&lt;');
       chart.innerHTML = `
         <div class="rules-head">Base TF Price</div>
         <div class="pc-legend" style="position:absolute; right:10px; top:6px; font-size:.8rem; color:#4b5563; background:rgba(255,255,255,.8); padding:2px 6px; border-radius:4px; display:none;"></div>
@@ -320,9 +329,41 @@
         </div>
         <input type="range" class="pc-scroll" min="0" value="0" step="1" style="width:100%; margin-top:6px;" />
         <pre class="pc-markers-json" style="display:none;">${markersJson}</pre>
+        <div class="ind-head" style="margin-top:8px;">Indicators (from rules)</div>
+        <svg class="ind-svg" data-w="${pc.w}" data-h="100" data-pad="${pc.pad}" viewBox="0 0 ${pc.w} 100" preserveAspectRatio="xMidYMid meet" width="100%" height="100">
+          <g class="ind-lines"></g>
+        </svg>
+        <pre class="pc-indicators-json" style="display:none;">${indsJson}</pre>
       `;
+      try{ chart.setAttribute('data-system-sid', (r.system_sid||'')); }catch(e){}
       kp.appendChild(chart);
       setTimeout(function(){ initTsChart(chart); }, 0);
+    }
+    // Open positions table (after chart)
+    let openTbl = null;
+    const openPositions = (r.open_positions||[]);
+    if(openPositions && openPositions.length){
+      openTbl = document.createElement('div');
+      let rows = '';
+      for(const p of openPositions){
+        rows += `<tr>
+          <td>${p.open_time? new Date(p.open_time).toLocaleString(): '-'}</td>
+          <td>${p.open_dir||'-'}</td>
+          <td>${p.open_price!=null? Number(p.open_price).toFixed(5): '-'}</td>
+          <td>${p.cur_price!=null? Number(p.cur_price).toFixed(5): '-'}</td>
+          <td>${p.open_pnl!=null? Number(p.open_pnl).toFixed(1): '-'}</td>
+        </tr>`;
+      }
+      openTbl.innerHTML = `
+        <div style="background:white; border:1px solid #dee2e6; border-radius:8px; overflow:hidden; margin-top:1rem;">
+          <table class="table">
+            <thead>
+              <tr style="background:#f8f9fa;"><th colspan="5" style="text-align:left; font-weight:600;">Open Positions (no Close yet)</th></tr>
+              <tr style="background:#f8f9fa;"><th>Open Time</th><th>Direction</th><th>Open</th><th>Now</th><th>Unrealized (pips)</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
     }
     // Trades table with paging: first 10, then +50 per click
     const allTrades = (r.trades||[]).slice().reverse(); // latest first
@@ -366,8 +407,59 @@
     if(moreBtn){ moreBtn.addEventListener('click', function(){ renderRows(50); }); }
     const cont = qs('result');
     cont.innerHTML = '';
+    // Compose notices
+    try{
+      const evCount = (r.events_count||0);
+      const rulesUpdated = r.rules_updated_at ? new Date(r.rules_updated_at) : null;
+      const genAt = r.signals_generated_at ? new Date(r.signals_generated_at) : null;
+      const stale = (!!rulesUpdated && !!genAt) ? (rulesUpdated > genAt) : (!!r.signals_stale);
+      if(evCount === 0){
+        addNotice('No signals found for this system. Generate them in Admin or click Regenerate below.', 'alert-warn');
+      }
+      if(stale){
+        addNotice('Signals may be stale. Rules were updated after the last signal. Consider regenerating.', 'alert-warn');
+      }
+      // Add regenerate button
+      const regen = document.createElement('div');
+      regen.style.margin = '6px 0 10px';
+      regen.innerHTML = '<button type="button" class="btn btn-pro" id="regenBtn">Re-generate signals now</button> <span id="regenMsg" class="text-subtle" style="margin-left:8px;"></span>';
+      notices.appendChild(regen);
+      cont.appendChild(notices);
+      const regenBtn = regen.querySelector('#regenBtn');
+      const regenMsg = regen.querySelector('#regenMsg');
+      if(regenBtn){
+        regenBtn.addEventListener('click', function(){
+          regenBtn.disabled = true; regenMsg.textContent = 'Regenerating…';
+          const fd = new FormData(); fd.set('system', String(r.system_id||''));
+          fetch('{% url "main:api_ts_regenerate_signals" %}', {method:'POST', body:fd, headers:{'X-CSRFToken': getCookie('csrftoken')}, credentials:'same-origin'})
+            .then(r=>r.json()).then(d=>{
+              if(!d || !d.success){ throw new Error(d && d.message ? d.message : 'regen failed'); }
+              regenMsg.textContent = 'Done: '+(d.saved||0)+' events. Rerunning…';
+              setTimeout(function(){ startSim(); }, 300);
+            }).catch(err=>{
+              regenMsg.textContent = 'Error: ' + (err && err.message ? err.message : String(err));
+              regenBtn.disabled = false;
+            });
+        });
+      }
+    }catch(e){}
     cont.appendChild(kp);
+    if(openTbl){ cont.appendChild(openTbl); }
     cont.appendChild(tbl);
+    // Rules block at the bottom
+    if(r.rules_clean){
+      const rules = document.createElement('div');
+      rules.className = 'rules-box card-flat';
+      const head = document.createElement('div');
+      head.className = 'rules-head';
+      head.textContent = 'Trading Rules';
+      const pre = document.createElement('pre');
+      pre.className = 'rules-pre';
+      pre.textContent = r.rules_clean;
+      rules.appendChild(head);
+      rules.appendChild(pre);
+      cont.appendChild(rules);
+    }
     // Update tick info field regardless of chart
     try{
       var tick = (r.mt5_tick_size!=null? r.mt5_tick_size : '-');
@@ -435,6 +527,15 @@
     });
     var cross = svg.querySelector('.pc-cross'); var hline = cross? cross.querySelector('.cross-h'): null; var vline = cross? cross.querySelector('.cross-v'): null;
     var barsG = svg.querySelector('g.bars'); var marksG = svg.querySelector('g.marks');
+    var indSvg = container.querySelector('.ind-svg');
+    var indLinesG = indSvg ? indSvg.querySelector('g.ind-lines') : null;
+    // Parse indicators JSON once; keep in closure
+    var indList = [];
+    try{
+      var indEl = container.querySelector('.pc-indicators-json');
+      indList = JSON.parse(indEl ? (indEl.textContent||'[]') : '[]') || [];
+      if(!Array.isArray(indList)) indList = [];
+    }catch(e){ indList = []; }
     var counter = toolbar.querySelector('.pc-bars-count');
     var scaleStep = 10; var minBars = Math.min(n, scaleStep); var maxVisible = Math.min(n, 250); var defaultBars = maxVisible; var targetBars = Math.round(Math.max(minBars, defaultBars)); var offset = Math.max(0, n - targetBars);
     var state = { sx: 1, sy: 1, pmin: globalMin, pmax: globalMax };
@@ -444,7 +545,23 @@
     function visibleBars(){ return Math.max(minBars, Math.min(maxVisible, targetBars)); }
     function formatBaseLegend(idx, price){ var dt = dts[idx] || ''; return dt + ' | ' + (isFinite(price)? price.toFixed(5): '—'); }
     function formatIndicatorValue(val){ if(val===true) return '✓'; if(val===false) return '✗'; if(typeof val==='number') return String(val); if(val==null) return '-'; return String(val); }
-    function formatMarkerLegend(marker){ var idx=marker.i; var price=marker.price; var text=formatBaseLegend(idx, price); var extras=[]; if(marker.type){ extras.push(marker.type); } var inds=marker.indicators||{}; var keys=Object.keys(inds).sort(); if(keys.length){ var parts=[]; keys.forEach(function(k){ parts.push(k+': '+formatIndicatorValue(inds[k])); }); extras.push('Indicators: '+parts.join(', ')); } if(extras.length){ text+=' | '+extras.join(' | ');} return text; }
+    var systemSid = (container.getAttribute('data-system-sid')||'');
+    function formatMarkerLegend(marker){ var idx=marker.i; var price=marker.price; var text=formatBaseLegend(idx, price); var extras=[]; if(systemSid){ extras.push('System: '+systemSid); } if(marker.type){ extras.push(marker.type); } var inds=marker.indicators||{}; var keys=Object.keys(inds).sort(); if(keys.length){ var parts=[]; keys.forEach(function(k){ parts.push(k+': '+formatIndicatorValue(inds[k])); }); extras.push('Indicators: '+parts.join(', ')); } if(extras.length){ text+=' | '+extras.join(' | ');} return text; }
+    function formatLegendWithIndicators(idx, price){
+      var base = formatBaseLegend(idx, price);
+      if(!indList || !indList.length) return base;
+      var parts = [];
+      for(var k=0; k<indList.length; k++){
+        var ser = indList[k] || {}; var name = ser.name || ('IND'+k); var lvl = ser.level; var arr = ser.values||[];
+        var v = (idx>=0 && idx < arr.length) ? arr[idx] : null;
+        if(v === null || v === undefined || Number.isNaN(v)) continue;
+        parts.push(name + (lvl!=null? ('[L'+lvl+']'):'') + ': ' + String(v));
+        if(parts.length >= 6) break;
+      }
+      if(!parts.length) return base;
+      return base + ' | Indicators: ' + parts.join(', ');
+    }
+
     function render(){
       var vb = visibleBars(); if(counter){ counter.textContent = n ? ('Bars: ' + vb + ' / ' + n) : ('Bars: ' + vb); }
       var useScroll = n > vb; var maxOff = clampOffset(); if(!useScroll){ offset = Math.max(0, n - vb); maxOff = clampOffset(); }
@@ -455,6 +572,7 @@
       if(!isFinite(localMax)) localMax = globalMax; if(!isFinite(localMin)) localMin = globalMin; if(localMax===localMin){ var adjust = Math.abs(localMax||1)*0.001; if(!adjust) adjust=0.001; localMax+=adjust; localMin-=adjust; }
       var sy = (h - 2*pad) / (localMax - localMin);
       state.sx = sx; state.sy = sy; state.pmin = localMin; state.pmax = localMax; barsG.innerHTML = ''; marksG.innerHTML = '';
+      // indList already parsed in outer scope
       var tw = Math.max(2.0, Math.min(6.0, sx * 0.35));
       for(var i=start; i<end; i++){
         var high = highs[i]; var low = lows[i]; if(!isFinite(high) || !isFinite(low)) continue;
@@ -469,6 +587,32 @@
         circle.addEventListener('mouseenter', function(){ activeMarker = marker; if(cross){ if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',markerY); hline.setAttribute('y2',markerY);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',markerX); vline.setAttribute('x2',markerX);} cross.style.display=''; } if(legend){ legend.style.display=''; legend.textContent = formatMarkerLegend(marker); } });
         circle.addEventListener('mouseleave', function(){ activeMarker=null; }); marksG.appendChild(circle);
       });
+      // Indicators subplot rendering
+      if(indSvg && indLinesG){
+        var istart = start, iend = end;
+        var ih = parseFloat(indSvg.getAttribute('viewBox').split(' ')[3] || '100');
+        var ipad = parseFloat(svg.dataset.pad || 6);
+        var ivmin = Infinity, ivmax = -Infinity;
+        for(var sidx=0; sidx<indList.length; sidx++){
+          var arr = (indList[sidx] && indList[sidx].values) || [];
+          for(var i=istart; i<iend; i++){
+            var v = arr[i]; if(typeof v==='number' && isFinite(v)){ if(v<ivmin) ivmin=v; if(v>ivmax) ivmax=v; }
+          }
+        }
+        if(!isFinite(ivmin) || !isFinite(ivmax) || ivmin===ivmax){ ivmin = 0; ivmax = ivmin + 1; }
+        var isy = (ih - 2*ipad) / (ivmax - ivmin);
+        indLinesG.innerHTML = '';
+        for(var sidx=0; sidx<indList.length; sidx++){
+          var ser = indList[sidx]||{}; var arr = ser.values||[]; var parts = [];
+          for(var i=istart; i<iend; i++){
+            var v = arr[i]; if(!(typeof v==='number' && isFinite(v))) continue;
+            var x = pad + (i - istart) * sx;
+            var y = ih - ipad - (v - ivmin) * isy;
+            parts.push((parts.length? 'L':'M') + x.toFixed(1) + ',' + y.toFixed(1));
+          }
+          if(parts.length){ var path = document.createElementNS('http://www.w3.org/2000/svg','path'); path.setAttribute('d', parts.join(' ')); path.setAttribute('class','ind-line c'+(sidx%6)); indLinesG.appendChild(path); }
+        }
+      }
       scroll.max = maxOff; scroll.value = offset; scroll.disabled = !useScroll; scroll.style.opacity = useScroll? '1':'0.35'; scroll.title = useScroll? 'Horizontal scroll':'All bars visible'; if(activeMarker && legend){ legend.textContent = formatMarkerLegend(activeMarker); }
     }
     function changeBars(delta){ if(!delta) return; var next = targetBars + delta; next = Math.round(next); if(next<minBars) next=minBars; if(next>maxVisible) next=maxVisible; if(next===targetBars) return; targetBars=next; if(n<=targetBars){ offset=0; } else { clampOffset(); } render(); }
@@ -479,7 +623,7 @@
     function show(evt){ if(cross) cross.style.display=''; if(legend) legend.style.display=''; move(evt); }
     function hide(){ activeMarker=null; if(cross) cross.style.display='none'; if(legend) legend.style.display='none'; }
     function move(evt){ if(!cross) return; var sx = state.sx || 1; if(activeMarker){ var markerX = pad + (activeMarker.i - offset) * sx; var markerY = priceToY(activeMarker.price, state.pmin, state.sy || 1); if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',markerY); hline.setAttribute('y2',markerY);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',markerX); vline.setAttribute('x2',markerX);} if(legend){ legend.textContent = formatMarkerLegend(activeMarker);} return; }
-      var pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY; var loc = pt.matrixTransform(svg.getScreenCTM().inverse()); var x = Math.max(pad, Math.min(w-pad, loc.x)); var y = Math.max(pad, Math.min(h-pad, loc.y)); if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',y); hline.setAttribute('y2',y);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',x); vline.setAttribute('x2',x);} var idx = Math.round((x - pad) / (state.sx||1)) + offset; if(idx < 0) idx = 0; if(idx >= n) idx = n - 1; var price = state.pmin + ((h - pad - y) / (state.sy || 1)); if(!isFinite(price)) price = state.pmin; if(legend){ legend.textContent = formatBaseLegend(idx, price); }
+      var pt = svg.createSVGPoint(); pt.x = evt.clientX; pt.y = evt.clientY; var loc = pt.matrixTransform(svg.getScreenCTM().inverse()); var x = Math.max(pad, Math.min(w-pad, loc.x)); var y = Math.max(pad, Math.min(h-pad, loc.y)); if(hline){ hline.setAttribute('x1',0); hline.setAttribute('x2',w); hline.setAttribute('y1',y); hline.setAttribute('y2',y);} if(vline){ vline.setAttribute('y1',0); vline.setAttribute('y2',h); vline.setAttribute('x1',x); vline.setAttribute('x2',x);} var idx = Math.round((x - pad) / (state.sx||1)) + offset; if(idx < 0) idx = 0; if(idx >= n) idx = n - 1; var price = state.pmin + ((h - pad - y) / (state.sy || 1)); if(!isFinite(price)) price = state.pmin; if(legend){ legend.textContent = formatLegendWithIndicators(idx, price); }
     }
     svg.addEventListener('mouseenter', show); svg.addEventListener('mousemove', move); svg.addEventListener('mouseleave', hide); render();
   }
@@ -521,6 +665,15 @@
   .spark-bars .bar.neg{ background:#dc3545; }
   .spark-bars .lbl{ font-size:11px; color:#6c757d; margin-top:2px; }
   .price-svg .bar{ stroke:#4b5563; stroke-width:1; }
+  .alert{ border:1px solid #f1c40f; background:#fff8e1; color:#7a5d01; padding:8px 10px; border-radius:6px; margin:4px 0; }
+  .alert-warn{ border-color:#f1c40f; background:#fff8e1; }
+  .ind-svg .ind-line{ fill:none; stroke-width:1.2; }
+  .ind-svg .ind-line.c0{ stroke:#1f77b4; }
+  .ind-svg .ind-line.c1{ stroke:#ff7f0e; }
+  .ind-svg .ind-line.c2{ stroke:#2ca02c; }
+  .ind-svg .ind-line.c3{ stroke:#d62728; }
+  .ind-svg .ind-line.c4{ stroke:#9467bd; }
+  .ind-svg .ind-line.c5{ stroke:#8c564b; }
   .mk.buy-open, .mk.buy-close{ fill:#28a745; }
   .mk.sell-open, .mk.sell-close{ fill:#dc3545; }
   .pc-cross .cross-h, .pc-cross .cross-v{ stroke:#cbd5e1; stroke-width:.8; }
